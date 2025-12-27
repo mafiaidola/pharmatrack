@@ -1,0 +1,187 @@
+{
+  "identity": {
+    "persona": "E1: The Anti-AI Designer",
+    "philosophy": "Clinical Precision. Trust over Trend. Function over Fluff.",
+    "principles": [
+      "Fusion over Imitation: Mix Medical Sterility with Fintech Precision.",
+      "Emotion First: Calm, Trust, Efficiency.",
+      "Content is King: Data must be scannable instantly.",
+      "Zoom In: Focus on the task at hand (Visit, Order, Map).",
+      "Negative Space: Reduce cognitive load for tired field reps."
+    ]
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Manrope, sans-serif",
+      "body": "Inter, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "weights": {
+      "light": 300,
+      "regular": 400,
+      "medium": 500,
+      "bold": 700,
+      "black": 900
+    },
+    "usage": {
+      "h1": "text-4xl md:text-5xl font-bold tracking-tight text-slate-900",
+      "h2": "text-3xl font-semibold tracking-tight text-slate-800",
+      "h3": "text-2xl font-medium text-slate-800",
+      "body": "text-base leading-relaxed text-slate-600",
+      "caption": "text-xs font-medium uppercase tracking-wider text-slate-500",
+      "label": "text-sm font-semibold text-slate-700"
+    }
+  },
+  "colors": {
+    "palette": {
+      "primary": {
+        "name": "Surgical Teal",
+        "50": "#f0fdfa",
+        "100": "#ccfbf1",
+        "200": "#99f6e4",
+        "300": "#5eead4",
+        "400": "#2dd4bf",
+        "500": "#14b8a6",
+        "600": "#0d9488",
+        "700": "#0f766e",
+        "800": "#115e59",
+        "900": "#134e4a",
+        "DEFAULT": "#0d9488",
+        "foreground": "#ffffff"
+      },
+      "secondary": {
+        "name": "Slate Grey",
+        "50": "#f8fafc",
+        "100": "#f1f5f9",
+        "200": "#e2e8f0",
+        "300": "#cbd5e1",
+        "400": "#94a3b8",
+        "500": "#64748b",
+        "600": "#475569",
+        "700": "#334155",
+        "800": "#1e293b",
+        "900": "#0f172a",
+        "DEFAULT": "#f1f5f9",
+        "foreground": "#0f172a"
+      },
+      "accent": {
+        "name": "Signal Orange",
+        "DEFAULT": "#f97316",
+        "foreground": "#ffffff"
+      },
+      "background": {
+        "light": "#ffffff",
+        "dark": "#0f172a",
+        "subtle": "#f8fafc"
+      },
+      "status": {
+        "success": "#10b981",
+        "warning": "#f59e0b",
+        "error": "#ef4444",
+        "info": "#3b82f6"
+      }
+    },
+    "rules": [
+      "NO pure black (#000000). Use Slate-900 (#0f172a).",
+      "NO pure white text on pure black background. Use off-white (#f8fafc) on Slate-900.",
+      "Primary color (Teal) is for ACTIONS only (Buttons, Links, Active States).",
+      "Backgrounds should be mostly White or Slate-50.",
+      "Borders should be Slate-200.",
+      "Gradients are FORBIDDEN except for subtle active states (e.g., bg-gradient-to-r from-teal-50 to-transparent)."
+    ]
+  },
+  "layout": {
+    "spacing_scale": [
+      "p-1", "p-2", "p-4", "p-6", "p-8", "p-12", "p-16", "p-24", "p-32"
+    ],
+    "strategies": {
+      "dashboard_desktop": {
+        "type": "Control Room Grid",
+        "grid": "grid-cols-12 gap-6",
+        "sidebar": "col-span-2 fixed h-screen border-r border-slate-200 bg-white z-50",
+        "main_content": "col-span-10 col-start-3 p-8 bg-slate-50 min-h-screen",
+        "widgets": "bg-white rounded-xl border border-slate-200 shadow-sm p-6"
+      },
+      "mobile_rep_view": {
+        "type": "Feed Layout",
+        "container": "flex flex-col gap-4 p-4 pb-24 bg-slate-50 min-h-screen",
+        "card": "bg-white rounded-2xl border border-slate-100 shadow-sm p-5 active:scale-[0.98] transition-transform",
+        "bottom_nav": "fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 h-16 flex justify-around items-center z-50 safe-area-pb"
+      }
+    },
+    "constraints": {
+      "max_width": "max-w-7xl mx-auto",
+      "mobile_image_height": "max-h-[40vh]"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 rounded-full font-medium transition-all shadow-sm hover:shadow-md active:scale-95",
+      "secondary": "bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 h-10 px-4 py-2 rounded-full font-medium transition-all",
+      "ghost": "hover:bg-slate-100 text-slate-600 hover:text-slate-900 h-10 px-4 py-2 rounded-full font-medium transition-all",
+      "destructive": "bg-red-50 text-red-600 hover:bg-red-100 border border-red-100 h-10 px-4 py-2 rounded-full font-medium transition-all"
+    },
+    "cards": {
+      "base": "bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow duration-300",
+      "interactive": "cursor-pointer hover:border-primary/50 hover:ring-1 hover:ring-primary/50"
+    },
+    "inputs": {
+      "base": "flex h-10 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm ring-offset-white file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+      "label": "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70 mb-2 block text-slate-700"
+    },
+    "maps": {
+      "container": "w-full h-full rounded-xl overflow-hidden border border-slate-200 relative",
+      "overlay": "absolute top-4 left-4 bg-white/90 backdrop-blur-md p-4 rounded-lg shadow-lg border border-slate-200 z-10 max-w-xs"
+    }
+  },
+  "visual_enhancers": {
+    "glassmorphism": "bg-white/80 backdrop-blur-xl border border-white/20 shadow-sm",
+    "shadows": {
+      "soft": "shadow-[0_2px_8px_rgba(0,0,0,0.04)]",
+      "medium": "shadow-[0_4px_16px_rgba(0,0,0,0.08)]",
+      "float": "shadow-[0_8px_30px_rgba(0,0,0,0.12)]"
+    },
+    "borders": "border border-slate-200",
+    "radius": "rounded-xl"
+  },
+  "motion": {
+    "transitions": "transition-all duration-200 ease-out",
+    "hover": "hover:-translate-y-0.5",
+    "active": "active:scale-95",
+    "page_enter": "animate-in fade-in slide-in-from-bottom-4 duration-500"
+  },
+  "images": {
+    "clinic_exterior": {
+      "url": "https://images.pexels.com/photos/9741531/pexels-photo-9741531.jpeg",
+      "alt": "Modern glass medical clinic exterior",
+      "usage": "Clinic detail pages, Dashboard headers"
+    },
+    "medical_rep": {
+      "url": "https://images.pexels.com/photos/5407206/pexels-photo-5407206.jpeg",
+      "alt": "Professional medical representative with tablet",
+      "usage": "Profile placeholders, Login page hero"
+    },
+    "pharmaceuticals": {
+      "url": "https://images.unsplash.com/photo-1634621389220-e46db20b18ba?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzR8MHwxfHNlYXJjaHwyfHxwaGFybWFjZXV0aWNhbCUyMHBpbGxzJTIwYmxpc3RlciUyMHBhY2slMjBjbGVhbiUyMGJhY2tncm91bmR8ZW58MHx8fHwxNzY0NzAxNzA5fDA&ixlib=rb-4.1.0&q=85",
+      "alt": "Clean blister pack of pills",
+      "usage": "Order management, Product lists"
+    }
+  },
+  "accessibility": {
+    "contrast": "Ensure 4.5:1 contrast ratio for normal text. Use Slate-600+ on white.",
+    "focus": "Visible focus rings (ring-2 ring-primary) on all interactive elements.",
+    "touch_targets": "Minimum 44x44px for all mobile touch targets.",
+    "aria": "Use aria-labels for icon-only buttons."
+  },
+  "universal_guidelines": [
+    "DO NOT use generic 'SaaS Blue' (#3b82f6). Use the defined Teal palette.",
+    "DO NOT use gradients for backgrounds. Use solid colors or subtle noise textures.",
+    "DO NOT center text by default. Left-align for readability.",
+    "ALWAYS use 'data-testid' on interactive elements.",
+    "ALWAYS use 'sonner' for toasts.",
+    "ALWAYS use 'lucide-react' for icons.",
+    "Mobile First: Design for the Rep in the field first, then the Admin in the office.",
+    "Offline Mode: UI must clearly indicate sync status (Green = Synced, Amber = Pending)."
+  ],
+  "instructions_to_main_agent": "You are building a high-trust medical dashboard. Precision is key. Do not make it look like a toy. Use the provided Teal color palette strictly. Implement the 'Control Room' layout for Admins and 'Feed' layout for Reps. Ensure all forms are clean, spacious, and validated. Use the provided image URLs for placeholders."
+}

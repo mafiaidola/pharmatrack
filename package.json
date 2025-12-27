@@ -1,0 +1,30 @@
+{
+  "name": "medtrack",
+  "version": "1.0.0",
+  "description": "Medical Representative Tracking System with GPS monitoring",
+  "scripts": {
+    "setup": "npm run setup:backend && npm run setup:frontend",
+    "setup:backend": "cd backend && python -m venv venv && venv/bin/pip install -r requirements.txt",
+    "setup:frontend": "cd frontend && yarn install",
+    "start": "concurrently \"npm run start:backend\" \"npm run start:frontend\"",
+    "start:backend": "cd backend && venv/bin/uvicorn server:app --reload --host 0.0.0.0 --port 8001",
+    "start:frontend": "cd frontend && yarn start",
+    "seed": "cd backend && venv/bin/python ../scripts/seed_data.py",
+    "dev": "npm run start"
+  },
+  "keywords": [
+    "medical",
+    "tracking",
+    "gps",
+    "healthcare",
+    "crm",
+    "fastapi",
+    "react",
+    "mongodb"
+  ],
+  "author": "MedTrack Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
