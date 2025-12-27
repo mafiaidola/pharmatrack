@@ -68,6 +68,11 @@ db = client[os.environ['DB_NAME']]
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
+# Health check endpoint for Railway/Docker deployment
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "pharmatrack-backend"}
+
 # CORS Middleware - Allow specific origins for development and production
 def get_cors_origins():
     """Get CORS origins from environment or use defaults for development."""
