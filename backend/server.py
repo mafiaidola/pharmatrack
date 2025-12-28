@@ -20,6 +20,8 @@ from enum import Enum
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+import boto3
+from botocore.exceptions import ClientError
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -28,6 +30,61 @@ load_dotenv(ROOT_DIR / '.env')
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 # Force reload: 2025-12-26
+
+# AWS S3 Configuration
+S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'pharmatrack-uploads-prod')
+AWS_REGION = os.environ.get('AWS_REGION', 'us-east-1')
+
+# Initialize S3 client (if AWS credentials are available)
+s3_client = None
+try:
+    if os.environ.get('AWS_ACCESS_KEY_ID') and os.environ.get('AWS_SECRET_ACCESS_KEY'):
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=os.environ.get('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.environ.get('AWS_SECRET_ACCESS_KEY'),
+            region_name=AWS_REGION
+        )
+        logger.info(f"✅ S3 client initialized for bucket: {S3_BUCKET_NAME}")
+    else:
+        logger.warning("⚠️ AWS credentials not found - file uploads will use local storage")
+except Exception as e:
+    logger.error(f"Failed to initialize S3 client: {e}")
+
+async def upload_file_to_s3(file_content: bytes, file_name: str, content_type: str = 'application/octet-stream') -> str:
+    """
+    Upload a file to S3 and return the public URL.
+    Falls back to local storage if S3 is not configured.
+    """
+    if s3_client:
+        try:
+            # Generate unique file name
+            unique_name = f"{uuid.uuid4().hex}_{file_name}"
+            s3_key = f"uploads/{unique_name}"
+            
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=s3_key,
+                Body=file_content,
+                ContentType=content_type
+            )
+            
+            # Return public URL
+            url = f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
+            logger.info(f"File uploaded to S3: {url}")
+            return url
+        except ClientError as e:
+            logger.error(f"S3 upload failed: {e}")
+            raise HTTPException(status_code=500, detail="Failed to upload file to S3")
+    else:
+        # Fallback to local storage (for development)
+        uploads_dir = ROOT_DIR / 'uploads'
+        uploads_dir.mkdir(exist_ok=True)
+        unique_name = f"{uuid.uuid4().hex}_{file_name}"
+        file_path = uploads_dir / unique_name
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        return f"/uploads/{unique_name}"
 
 # MongoDB connection
 def get_mongo_url():
