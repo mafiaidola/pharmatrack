@@ -3153,30 +3153,19 @@ async def upload_expense_receipt(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """Upload receipt image for expense claim. No file size limit."""
+    """Upload receipt image for expense claim - uploads to S3 in production"""
     # Validate file type
     allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"]
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail="Invalid file type. Only images and PDF allowed.")
     
-    # No file size limit - handled by server config
+    # Read file content
+    file_content = await file.read()
     
-    # Create uploads directory if it doesn't exist
-    uploads_dir = Path("uploads/receipts")
-    uploads_dir.mkdir(parents=True, exist_ok=True)
+    # Upload to S3 (or local fallback)
+    file_url = await upload_file_to_s3(file_content, f"receipt_{file.filename}", file.content_type)
     
-    # Generate unique filename
-    file_extension = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    unique_filename = f"receipt_{str(uuid.uuid4())}.{file_extension}"
-    file_path = uploads_dir / unique_filename
-    
-    # Save file
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    # Return relative URL
-    file_url = f"/uploads/receipts/{unique_filename}"
-    return {"url": file_url, "filename": unique_filename}
+    return {"url": file_url, "filename": file.filename}
 
 class ExpenseApprovalRequest(BaseModel):
     rejection_reason: Optional[str] = None
@@ -4620,7 +4609,7 @@ async def upload_image(
     file: UploadFile = File(...),
     current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
 ):
-    """Upload image for site customization"""
+    """Upload image for site customization - uploads to S3 in production"""
     # Validate file type
     allowed_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"]
     if file.content_type not in allowed_types:
@@ -4634,22 +4623,13 @@ async def upload_image(
     if file_size > 5 * 1024 * 1024:  # 5MB
         raise HTTPException(status_code=400, detail="File too large. Maximum size is 5MB.")
     
-    # Create uploads directory if it doesn't exist
-    uploads_dir = Path("uploads")
-    uploads_dir.mkdir(exist_ok=True)
+    # Read file content
+    file_content = await file.read()
     
-    # Generate unique filename
-    file_extension = file.filename.split(".")[-1]
-    unique_filename = f"{str(uuid.uuid4())}.{file_extension}"
-    file_path = uploads_dir / unique_filename
+    # Upload to S3 (or local fallback)
+    file_url = await upload_file_to_s3(file_content, file.filename, file.content_type)
     
-    # Save file
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    # Return URL
-    file_url = f"/uploads/{unique_filename}"
-    return {"url": file_url, "filename": unique_filename}
+    return {"url": file_url, "filename": file.filename}
 
 @app.get("/uploads/{filename}")
 async def serve_upload(filename: str):
