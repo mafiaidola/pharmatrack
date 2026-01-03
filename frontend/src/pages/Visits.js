@@ -905,7 +905,100 @@ const Visits = ({ user, onLogout }) => {
                 </div>
               )}
 
+              {/* Visit Chat Section */}
+              <div className="border-t border-slate-100 pt-4">
+                <Label className="text-xs text-slate-500 uppercase mb-2 flex items-center gap-2">
+                  <span>💬</span> التعليقات ({selectedVisit.comments?.length || 0})
+                </Label>
+
+                {/* Comments List */}
+                <div className="space-y-2 max-h-40 overflow-y-auto mb-3">
+                  {selectedVisit.comments?.length > 0 ? (
+                    selectedVisit.comments.map((comment) => (
+                      <div key={comment.id} className="flex gap-2 p-2 bg-slate-50 rounded-lg">
+                        <div className="w-7 h-7 bg-primary/20 rounded-full flex items-center justify-center text-xs font-bold text-primary">
+                          {comment.user_name?.charAt(0) || '?'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-semibold text-slate-700">{comment.user_name}</span>
+                            <span className="text-xs text-slate-400">
+                              {new Date(comment.created_at).toLocaleDateString('ar-EG')}
+                            </span>
+                          </div>
+                          <p className="text-sm text-slate-600">{comment.content}</p>
+                        </div>
+                        {(user?.id === comment.user_id || user?.role === 'super_admin') && (
+                          <button
+                            onClick={async () => {
+                              try {
+                                await api.delete(`/visits/${selectedVisit.id}/comments/${comment.id}`);
+                                toast.success('تم حذف التعليق');
+                                // Refresh visit
+                                const res = await api.get(`/visits/${selectedVisit.id}`);
+                                setSelectedVisit(res.data);
+                              } catch (e) {
+                                toast.error('فشل في حذف التعليق');
+                              }
+                            }}
+                            className="text-red-400 hover:text-red-600"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-xs text-slate-400 italic text-center py-2">لا توجد تعليقات بعد</p>
+                  )}
+                </div>
+
+                {/* Add Comment Input */}
+                <div className="flex gap-2">
+                  <Input
+                    id="new-comment"
+                    placeholder="اكتب تعليقاً..."
+                    className="flex-1 text-sm"
+                    onKeyDown={async (e) => {
+                      if (e.key === 'Enter' && e.target.value.trim()) {
+                        try {
+                          await api.post(`/visits/${selectedVisit.id}/comments`, { content: e.target.value.trim() });
+                          e.target.value = '';
+                          toast.success('تم إضافة التعليق');
+                          // Refresh visit
+                          const res = await api.get(`/visits/${selectedVisit.id}`);
+                          setSelectedVisit(res.data);
+                        } catch (err) {
+                          toast.error('فشل في إضافة التعليق');
+                        }
+                      }
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    onClick={async () => {
+                      const input = document.getElementById('new-comment');
+                      if (input.value.trim()) {
+                        try {
+                          await api.post(`/visits/${selectedVisit.id}/comments`, { content: input.value.trim() });
+                          input.value = '';
+                          toast.success('تم إضافة التعليق');
+                          // Refresh visit
+                          const res = await api.get(`/visits/${selectedVisit.id}`);
+                          setSelectedVisit(res.data);
+                        } catch (err) {
+                          toast.error('فشل في إضافة التعليق');
+                        }
+                      }
+                    }}
+                  >
+                    إرسال
+                  </Button>
+                </div>
+              </div>
+
               <div className="flex gap-3 pt-4 border-t border-slate-100">
+
                 {(user?.role === 'medical_rep' || user?.role === 'gm' || user?.role === 'super_admin') && (
                   <Button
                     variant="outline"

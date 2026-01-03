@@ -730,8 +730,13 @@ class Visit(BaseModel):
     # Embedded Order - created automatically when visit has order data
     embedded_order: Optional[dict] = None  # {enabled, order_type, products, total_amount, etc.}
     embedded_order_id: Optional[str] = None  # ID of auto-created order
+    # Visit Chat - Comments from team members
+    comments: List[dict] = Field(default_factory=list)  # [{id, user_id, user_name, content, created_at}]
+    # Link to planned visit from Plans module
+    planned_visit_id: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     synced: bool = True
+
 
 class VisitCreate(BaseModel):
     clinic_id: str
@@ -2600,7 +2605,177 @@ async def delete_visit(
         raise HTTPException(status_code=404, detail="Visit not found")
     return {"message": "Visit deleted successfully"}
 
+# ============== Visit Chat Endpoints ==============
+
+class VisitCommentCreate(BaseModel):
+    content: str
+
+@api_router.post("/visits/{visit_id}/comments")
+async def add_visit_comment(
+    visit_id: str,
+    comment_data: VisitCommentCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Add a comment to a visit (Visit Chat)."""
+    visit = await db.visits.find_one({"id": visit_id}, {"_id": 0})
+    if not visit:
+        raise HTTPException(status_code=404, detail="Visit not found")
+    
+    comment = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "user_name": current_user.get("full_name", "Unknown"),
+        "content": comment_data.content,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.visits.update_one(
+        {"id": visit_id},
+        {"$push": {"comments": comment}}
+    )
+    
+    return comment
+
+@api_router.delete("/visits/{visit_id}/comments/{comment_id}")
+async def delete_visit_comment(
+    visit_id: str,
+    comment_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a comment from a visit."""
+    visit = await db.visits.find_one({"id": visit_id}, {"_id": 0})
+    if not visit:
+        raise HTTPException(status_code=404, detail="Visit not found")
+    
+    # Check if user owns the comment or is admin
+    comments = visit.get("comments", [])
+    comment = next((c for c in comments if c.get("id") == comment_id), None)
+    
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    
+    if comment["user_id"] != current_user["id"] and current_user["role"] not in ["super_admin", "gm"]:
+        raise HTTPException(status_code=403, detail="You can only delete your own comments")
+    
+    await db.visits.update_one(
+        {"id": visit_id},
+        {"$pull": {"comments": {"id": comment_id}}}
+    )
+    
+    return {"message": "Comment deleted successfully"}
+
+# ============== Smart Reminders Endpoints ==============
+
+@api_router.get("/reminders/smart")
+async def get_smart_reminders(
+    current_user: dict = Depends(get_current_user)
+):
+    """Get smart reminders for the current user based on their role."""
+    reminders = []
+    today = datetime.now(timezone.utc).date()
+    
+    # For Medical Reps: Follow-up visits due today or overdue
+    if current_user["role"] in ["medical_rep", "super_admin", "gm"]:
+        user_filter = {}
+        if current_user["role"] == "medical_rep":
+            user_filter = {"medical_rep_id": current_user["id"]}
+        
+        # Follow-up reminders
+        follow_ups = await db.visits.find({
+            **user_filter,
+            "follow_up_date": {"$lte": datetime.now(timezone.utc).isoformat()}
+        }).to_list(100)
+        
+        for visit in follow_ups:
+            clinic = await db.clinics.find_one({"id": visit.get("clinic_id")}, {"_id": 0, "name": 1})
+            reminders.append({
+                "id": str(uuid.uuid4()),
+                "type": "follow_up",
+                "priority": "high",
+                "title": "متابعة مطلوبة",
+                "message": f"موعد المتابعة مع {clinic.get('name', 'عيادة')} اليوم أو فات موعده",
+                "entity_type": "visit",
+                "entity_id": visit.get("id"),
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+    
+    # For Managers: Pending approvals (plans, orders, expenses)
+    if current_user["role"] in ["manager", "gm", "super_admin"]:
+        # Pending plans
+        pending_plans = await db.plans.count_documents({"status": "pending_approval"})
+        if pending_plans > 0:
+            reminders.append({
+                "id": str(uuid.uuid4()),
+                "type": "pending_approval",
+                "priority": "medium",
+                "title": "خطط بانتظار الموافقة",
+                "message": f"يوجد {pending_plans} خطة بانتظار موافقتك",
+                "entity_type": "plan",
+                "entity_id": None,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+        
+        # Pending orders
+        pending_orders = await db.orders.count_documents({"status": "pending_approval"})
+        if pending_orders > 0:
+            reminders.append({
+                "id": str(uuid.uuid4()),
+                "type": "pending_approval",
+                "priority": "high",
+                "title": "طلبات بانتظار الموافقة",
+                "message": f"يوجد {pending_orders} طلب بانتظار موافقتك",
+                "entity_type": "order",
+                "entity_id": None,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+        
+        # Pending expenses
+        pending_expenses = await db.expenses.count_documents({"status": "pending"})
+        if pending_expenses > 0:
+            reminders.append({
+                "id": str(uuid.uuid4()),
+                "type": "pending_approval",
+                "priority": "medium",
+                "title": "مصروفات بانتظار الموافقة",
+                "message": f"يوجد {pending_expenses} مصروف بانتظار موافقتك",
+                "entity_type": "expense",
+                "entity_id": None,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+    
+    # Today's planned visits from Plans module
+    if current_user["role"] == "medical_rep":
+        current_month = today.month
+        current_year = today.year
+        
+        plans = await db.plans.find({
+            "user_id": current_user["id"],
+            "month": current_month,
+            "year": current_year,
+            "status": {"$in": ["approved", "active"]}
+        }).to_list(10)
+        
+        for plan in plans:
+            for pv in plan.get("planned_visits", []):
+                scheduled_date = pv.get("scheduled_date", "")
+                if isinstance(scheduled_date, str) and scheduled_date.startswith(str(today)):
+                    clinic = await db.clinics.find_one({"id": pv.get("clinic_id")}, {"_id": 0, "name": 1})
+                    if not pv.get("is_completed"):
+                        reminders.append({
+                            "id": str(uuid.uuid4()),
+                            "type": "planned_visit",
+                            "priority": "high",
+                            "title": "زيارة مخططة اليوم",
+                            "message": f"لديك زيارة مخططة لـ {clinic.get('name', 'عيادة')} اليوم",
+                            "entity_type": "planned_visit",
+                            "entity_id": pv.get("id"),
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        })
+    
+    return {"reminders": reminders, "count": len(reminders)}
+
 # Order Routes
+
 @api_router.post("/orders", response_model=Order)
 async def create_order(
     order_data: OrderCreate,
