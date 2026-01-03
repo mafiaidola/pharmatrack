@@ -14,7 +14,8 @@ import {
   LogOut,
   Menu,
   X,
-  RotateCcw
+  RotateCcw,
+  ClipboardList
 } from 'lucide-react';
 import { Button } from './ui/button';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -59,6 +60,7 @@ const Layout = ({ children, user, onLogout }) => {
     { nameKey: 'dashboard', href: '/', icon: LayoutDashboard, roles: ['super_admin', 'gm', 'manager', 'medical_rep'], color: 'text-sky-500' },
     { nameKey: 'clinics', href: '/clinics', icon: Building2, roles: ['super_admin', 'gm', 'manager', 'medical_rep'], color: 'text-violet-500' },
     { nameKey: 'visits', href: '/visits', icon: MapPin, roles: ['super_admin', 'gm', 'manager', 'medical_rep'], color: 'text-emerald-500' },
+    { nameKey: 'plans', href: '/plans', icon: ClipboardList, roles: ['super_admin', 'gm', 'manager', 'medical_rep'], color: 'text-blue-500' },
     { nameKey: 'orders', href: '/orders', icon: ShoppingCart, roles: ['super_admin', 'gm', 'manager', 'accountant', 'medical_rep'], color: 'text-orange-500' },
     { nameKey: 'expenses', href: '/expenses', icon: Receipt, roles: ['super_admin', 'gm', 'manager', 'medical_rep'], color: 'text-pink-500' },
     { nameKey: 'users', href: '/users', icon: Users, roles: ['super_admin', 'gm', 'manager'], color: 'text-cyan-500' },

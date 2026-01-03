@@ -35,6 +35,11 @@ const SuperAdminDashboard = ({ user, onLogout }) => {
     pending_expenses: 0,
     total_revenue: 0
   });
+  const [accountingStats, setAccountingStats] = useState({
+    totalRevenue: 0,
+    totalDebts: 0,
+    totalCollections: 0
+  });
   const [analytics, setAnalytics] = useState({ daily: [], totals: {} });
   const [topPerformers, setTopPerformers] = useState([]);
   const [recentActivities, setRecentActivities] = useState([]);
@@ -47,6 +52,7 @@ const SuperAdminDashboard = ({ user, onLogout }) => {
     fetchAnalytics();
     fetchTopPerformers();
     fetchRecentActivities();
+    fetchAccountingStats();
   }, []);
 
   const fetchStats = async () => {
@@ -55,6 +61,19 @@ const SuperAdminDashboard = ({ user, onLogout }) => {
       setStats(response.data);
     } catch (error) {
       toast.error('Failed to fetch stats');
+    }
+  };
+
+  const fetchAccountingStats = async () => {
+    try {
+      const response = await api.get('/accounting/dashboard');
+      setAccountingStats({
+        totalRevenue: response.data.total_revenue || 0,
+        totalDebts: response.data.total_outstanding || 0,
+        totalCollections: response.data.total_collected || 0
+      });
+    } catch (error) {
+      console.error('Failed to fetch accounting stats:', error);
     }
   };
 
@@ -422,16 +441,43 @@ const SuperAdminDashboard = ({ user, onLogout }) => {
           </Card>
         </div>
 
-        {/* Revenue Card */}
-        <Card className="p-6 border border-slate-200 rounded-xl shadow-sm bg-gradient-to-r from-emerald-50 to-teal-50">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-600 uppercase tracking-wider">{t('totalRevenue')}</p>
-              <p className="text-3xl font-bold text-emerald-700 mt-2">{formatCurrency(stats.total_revenue)}</p>
-              <p className="text-sm text-slate-500 mt-1">{t('fromApprovedOrders')}</p>
+        {/* Financial Metrics Card */}
+        <Card className="p-6 border border-slate-200 rounded-xl shadow-sm bg-gradient-to-r from-emerald-50 via-white to-blue-50">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Total Revenue */}
+            <div className="flex items-center justify-between p-4 bg-emerald-50 rounded-xl">
+              <div>
+                <p className="text-sm font-medium text-slate-600 uppercase tracking-wider">{t('totalRevenue')}</p>
+                <p className="text-2xl lg:text-3xl font-bold text-emerald-700 mt-2">{formatCurrency(accountingStats.totalRevenue)}</p>
+                <p className="text-xs text-emerald-600 mt-1">إجمالي الإيرادات</p>
+              </div>
+              <div className="w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center">
+                <DollarSign className="h-6 w-6 text-emerald-600" />
+              </div>
             </div>
-            <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center">
-              <DollarSign className="h-8 w-8 text-emerald-600" />
+
+            {/* Total Debts (Outstanding) */}
+            <div className="flex items-center justify-between p-4 bg-red-50 rounded-xl">
+              <div>
+                <p className="text-sm font-medium text-slate-600 uppercase tracking-wider">إجمالي الديون</p>
+                <p className="text-2xl lg:text-3xl font-bold text-red-600 mt-2">{formatCurrency(accountingStats.totalDebts)}</p>
+                <p className="text-xs text-red-500 mt-1">المبالغ المستحقة</p>
+              </div>
+              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
+                <TrendingUp className="h-6 w-6 text-red-500" />
+              </div>
+            </div>
+
+            {/* Total Collections */}
+            <div className="flex items-center justify-between p-4 bg-blue-50 rounded-xl">
+              <div>
+                <p className="text-sm font-medium text-slate-600 uppercase tracking-wider">إجمالي التحصيلات</p>
+                <p className="text-2xl lg:text-3xl font-bold text-blue-600 mt-2">{formatCurrency(accountingStats.totalCollections)}</p>
+                <p className="text-xs text-blue-500 mt-1">المدفوعات المستلمة</p>
+              </div>
+              <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
+                <Receipt className="h-6 w-6 text-blue-500" />
+              </div>
             </div>
           </div>
         </Card>

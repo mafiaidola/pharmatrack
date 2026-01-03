@@ -42,7 +42,7 @@ const NotificationBell = () => {
         setLoading(true);
         try {
             const response = await api.get('/notifications?limit=10');
-            setNotifications(response.data);
+            setNotifications(response.data.items || response.data);
         } catch (error) {
             console.error('Failed to fetch notifications');
         } finally {
@@ -59,7 +59,7 @@ const NotificationBell = () => {
 
     const handleMarkRead = async (id) => {
         try {
-            await api.patch(`/notifications/${id}/read`);
+            await api.put(`/notifications/${id}/read`);
             setNotifications(notifications.map(n =>
                 n.id === id ? { ...n, is_read: true } : n
             ));
@@ -71,7 +71,7 @@ const NotificationBell = () => {
 
     const handleMarkAllRead = async () => {
         try {
-            await api.patch('/notifications/mark-all-read');
+            await api.put('/notifications/mark-all-read');
             setNotifications(notifications.map(n => ({ ...n, is_read: true })));
             setUnreadCount(0);
         } catch (error) {
@@ -143,13 +143,22 @@ const NotificationBell = () => {
 
     const getIcon = (type) => {
         switch (type) {
-            case 'order_pending': return <ShoppingCart className="h-4 w-4 text-orange-500" />;
+            case 'order_pending':
+            case 'order_pending_approval': return <ShoppingCart className="h-4 w-4 text-orange-500" />;
             case 'order_approved': return <CheckCircle className="h-4 w-4 text-green-500" />;
             case 'order_rejected': return <X className="h-4 w-4 text-red-500" />;
+            case 'order_created': return <ShoppingCart className="h-4 w-4 text-blue-500" />;
             case 'expense_pending': return <Receipt className="h-4 w-4 text-orange-500" />;
             case 'expense_approved': return <CheckCircle className="h-4 w-4 text-green-500" />;
             case 'expense_rejected': return <X className="h-4 w-4 text-red-500" />;
             case 'visit': return <MapPin className="h-4 w-4 text-blue-500" />;
+            case 'invoice_due_today': return <Clock className="h-4 w-4 text-orange-500" />;
+            case 'invoice_due_tomorrow': return <Clock className="h-4 w-4 text-yellow-500" />;
+            case 'invoice_overdue': return <AlertCircle className="h-4 w-4 text-red-500" />;
+            case 'payment_received': return <CheckCircle className="h-4 w-4 text-green-500" />;
+            case 'installment_due': return <Receipt className="h-4 w-4 text-orange-500" />;
+            case 'daily_report':
+            case 'weekly_report': return <Package className="h-4 w-4 text-blue-500" />;
             default: return <AlertCircle className="h-4 w-4 text-blue-500" />;
         }
     };

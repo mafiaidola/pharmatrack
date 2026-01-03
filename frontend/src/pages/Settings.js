@@ -9,7 +9,7 @@ import { Switch } from '../components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
-import { Plus, Edit2, Trash2, MapPin, Layers, Navigation, Settings as SettingsIcon, Upload, Globe, Palette, Image as ImageIcon, Type, FileText, Printer, Receipt, Eye, RefreshCw, Download, Archive, AlertCircle, CheckCircle, Activity, User, Monitor, Clock, LogOut } from 'lucide-react';
+import { Plus, Edit2, Trash2, MapPin, Layers, Navigation, Settings as SettingsIcon, Upload, Globe, Palette, Image as ImageIcon, Type, FileText, Printer, Receipt, Eye, RefreshCw, Download, Archive, AlertCircle, CheckCircle, Activity, User, Monitor, Clock, LogOut, MessageCircle, Bell } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../utils/api';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -59,11 +59,21 @@ const Settings = ({ user, onLogout }) => {
   const [sessions, setSessions] = useState([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
 
+  // WhatsApp Settings State
+  const [whatsappSettings, setWhatsappSettings] = useState(null);
+  const [savingWhatsApp, setSavingWhatsApp] = useState(false);
+  const [testingWhatsApp, setTestingWhatsApp] = useState(false);
+  const [testPhone, setTestPhone] = useState('');
+  const [gatewayStatus, setGatewayStatus] = useState(null);
+  const [gatewayQR, setGatewayQR] = useState(null);
+  const [loadingGateway, setLoadingGateway] = useState(false);
+
   useEffect(() => {
     fetchLines();
     fetchAreas();
     if (user?.role === 'super_admin') {
       fetchGPSSettings();
+      fetchWhatsAppSettings();
     }
     fetchSiteSettings();
   }, [user]);
@@ -187,6 +197,109 @@ const Settings = ({ user, onLogout }) => {
     }
   };
 
+  // WhatsApp Settings Functions
+  const fetchWhatsAppSettings = async () => {
+    try {
+      const response = await api.get('/whatsapp-settings');
+      setWhatsappSettings(response.data);
+      // Fetch gateway status if using baileys
+      if (response.data?.api_provider === 'baileys' || response.data?.provider === 'baileys') {
+        fetchGatewayStatus();
+      }
+    } catch (error) {
+      console.error('Failed to load WhatsApp settings');
+      setWhatsappSettings({
+        enabled: false,
+        api_provider: 'baileys',
+        api_url: '',
+        api_key: '',
+        instance_id: '',
+        default_country_code: '+20',
+        reminder_7_days_enabled: true,
+        reminder_3_days_enabled: true,
+        reminder_due_day_enabled: true,
+        reminder_overdue_enabled: true,
+        template_reminder: 'مرحباً {clinic_name}، نذكركم بموعد استحقاق القسط رقم {installment_number} بقيمة {amount} بتاريخ {due_date}.',
+        template_overdue: 'مرحباً {clinic_name}، القسط رقم {installment_number} بقيمة {amount} متأخر منذ {days_overdue} يوم.',
+        template_payment_confirmation: 'شكراً {clinic_name}، تم استلام دفعة بقيمة {amount}. المتبقي: {remaining}.'
+      });
+    }
+  };
+
+  const fetchGatewayStatus = async () => {
+    setLoadingGateway(true);
+    try {
+      const response = await api.get('/whatsapp-gateway/status');
+      setGatewayStatus(response.data);
+      // If waiting for QR, fetch it
+      if (response.data?.status === 'waiting_for_scan') {
+        fetchGatewayQR();
+      }
+    } catch (error) {
+      setGatewayStatus({ status: 'offline', error: error.message });
+    } finally {
+      setLoadingGateway(false);
+    }
+  };
+
+  const fetchGatewayQR = async () => {
+    try {
+      const response = await api.get('/whatsapp-gateway/qr');
+      if (response.data?.qr) {
+        setGatewayQR(response.data.qr);
+      }
+    } catch (error) {
+      console.error('Failed to fetch QR code');
+    }
+  };
+
+  const handleReconnectGateway = async () => {
+    setLoadingGateway(true);
+    try {
+      await api.post('/whatsapp-gateway/reconnect');
+      toast.success('جاري إعادة الاتصال...');
+      setTimeout(fetchGatewayStatus, 3000);
+    } catch (error) {
+      toast.error('فشل في إعادة الاتصال');
+    } finally {
+      setLoadingGateway(false);
+    }
+  };
+
+  const handleWhatsAppSettingsUpdate = async () => {
+    setSavingWhatsApp(true);
+    try {
+      await api.put('/whatsapp-settings', whatsappSettings);
+      toast.success('تم حفظ إعدادات WhatsApp بنجاح');
+    } catch (error) {
+      toast.error('فشل في حفظ الإعدادات');
+    } finally {
+      setSavingWhatsApp(false);
+    }
+  };
+
+  const handleTestWhatsApp = async () => {
+    if (!testPhone) {
+      toast.error('يرجى إدخال رقم الهاتف');
+      return;
+    }
+    setTestingWhatsApp(true);
+    try {
+      const response = await api.post('/whatsapp-settings/test', {
+        phone: testPhone,
+        message: '🧪 رسالة اختبار من نظام EP-EG'
+      });
+      if (response.data.success) {
+        toast.success('تم إرسال رسالة الاختبار بنجاح ✅');
+      } else {
+        toast.error('فشل في الإرسال - تحقق من الإعدادات');
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'فشل في الاختبار');
+    } finally {
+      setTestingWhatsApp(false);
+    }
+  };
 
   const handleSiteSettingsUpdate = async () => {
     setSavingSite(true);
@@ -520,13 +633,17 @@ const Settings = ({ user, onLogout }) => {
             </div>
 
             <Tabs defaultValue="general" className="w-full">
-              <TabsList className="grid w-full grid-cols-5 mb-6">
+              <TabsList className="grid w-full grid-cols-7 mb-6">
                 <TabsTrigger value="general">General</TabsTrigger>
                 <TabsTrigger value="branding">Branding</TabsTrigger>
                 <TabsTrigger value="login">Login Page</TabsTrigger>
                 <TabsTrigger value="print">Print Templates</TabsTrigger>
                 <TabsTrigger value="footer">Footer</TabsTrigger>
                 <TabsTrigger value="system">System</TabsTrigger>
+                <TabsTrigger value="whatsapp" className="flex items-center gap-1">
+                  <MessageCircle className="h-4 w-4" />
+                  WhatsApp
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="general" className="space-y-4">
@@ -1459,6 +1576,278 @@ const Settings = ({ user, onLogout }) => {
                     </div>
                   </div>
                 </div>
+              </TabsContent>
+
+              {/* WhatsApp Settings Tab */}
+              <TabsContent value="whatsapp" className="space-y-6">
+                {whatsappSettings && (
+                  <>
+                    {/* Enable/Disable Toggle */}
+                    <div className="flex items-center justify-between p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl border border-green-200">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-green-500 rounded-full flex items-center justify-center">
+                          <MessageCircle className="h-5 w-5 text-white" />
+                        </div>
+                        <div>
+                          <Label className="text-base font-medium">تفعيل إشعارات WhatsApp</Label>
+                          <p className="text-sm text-slate-600">إرسال تذكيرات الأقساط عبر WhatsApp</p>
+                        </div>
+                      </div>
+                      <Switch
+                        checked={whatsappSettings.enabled}
+                        onCheckedChange={(checked) => setWhatsappSettings({ ...whatsappSettings, enabled: checked })}
+                      />
+                    </div>
+
+                    {whatsappSettings.enabled && (
+                      <>
+                        {/* API Configuration */}
+                        <div className="p-4 bg-slate-50 rounded-xl border space-y-4">
+                          <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                            <Globe className="h-4 w-4" />
+                            إعدادات API
+                          </h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <Label>مزود الخدمة</Label>
+                              <Select
+                                value={whatsappSettings.api_provider}
+                                onValueChange={(v) => setWhatsappSettings({ ...whatsappSettings, api_provider: v })}
+                              >
+                                <SelectTrigger className="mt-1">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="baileys">Baileys (مجاني ✅)</SelectItem>
+                                  <SelectItem value="ultramsg">UltraMsg</SelectItem>
+                                  <SelectItem value="twilio">Twilio</SelectItem>
+                                  <SelectItem value="wati">WATI</SelectItem>
+                                  <SelectItem value="360dialog">360dialog</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <div>
+                              <Label>كود الدولة الافتراضي</Label>
+                              <Input
+                                value={whatsappSettings.default_country_code}
+                                onChange={(e) => setWhatsappSettings({ ...whatsappSettings, default_country_code: e.target.value })}
+                                placeholder="+20"
+                                className="mt-1"
+                              />
+                            </div>
+                            <div>
+                              <Label>API Key / Token</Label>
+                              <Input
+                                type="password"
+                                value={whatsappSettings.api_key}
+                                onChange={(e) => setWhatsappSettings({ ...whatsappSettings, api_key: e.target.value })}
+                                placeholder="أدخل مفتاح API"
+                                className="mt-1"
+                              />
+                            </div>
+                            <div>
+                              <Label>Instance ID / Account SID</Label>
+                              <Input
+                                value={whatsappSettings.instance_id}
+                                onChange={(e) => setWhatsappSettings({ ...whatsappSettings, instance_id: e.target.value })}
+                                placeholder="أدخل معرف الحساب"
+                                className="mt-1"
+                              />
+                            </div>
+                            {/* Gateway URL - for Baileys */}
+                            {whatsappSettings.api_provider === 'baileys' && (
+                              <div className="col-span-2">
+                                <Label>Gateway URL (Railway)</Label>
+                                <Input
+                                  value={whatsappSettings.api_url || ''}
+                                  onChange={(e) => setWhatsappSettings({ ...whatsappSettings, api_url: e.target.value })}
+                                  placeholder="https://your-gateway.railway.app"
+                                  className="mt-1"
+                                />
+                                <p className="text-xs text-slate-500 mt-1">أدخل رابط خدمة WhatsApp Gateway على Railway</p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Baileys Connection Status */}
+                          {whatsappSettings.api_provider === 'baileys' && (
+                            <div className="mt-4 p-4 bg-gradient-to-r from-green-50 to-emerald-50 rounded-xl border border-green-200">
+                              <div className="flex items-center justify-between mb-3">
+                                <h4 className="font-semibold text-slate-800 flex items-center gap-2">
+                                  <MessageCircle className="h-4 w-4 text-green-600" />
+                                  حالة الاتصال بـ WhatsApp
+                                </h4>
+                                <div className="flex items-center gap-2">
+                                  {loadingGateway ? (
+                                    <span className="text-sm text-slate-500">جاري التحميل...</span>
+                                  ) : gatewayStatus?.status === 'connected' ? (
+                                    <span className="flex items-center gap-1 text-sm text-green-600 font-medium">
+                                      <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                                      متصل ✅
+                                    </span>
+                                  ) : gatewayStatus?.status === 'waiting_for_scan' ? (
+                                    <span className="flex items-center gap-1 text-sm text-orange-600">
+                                      <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></div>
+                                      في انتظار مسح QR
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1 text-sm text-red-600">
+                                      <div className="w-2 h-2 bg-red-500 rounded-full"></div>
+                                      غير متصل
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* QR Code Display */}
+                              {gatewayQR && gatewayStatus?.status === 'waiting_for_scan' && (
+                                <div className="flex flex-col items-center p-4 bg-white rounded-lg border mb-3">
+                                  <p className="text-sm text-slate-600 mb-2">امسح هذا الكود من تطبيق WhatsApp على الموبايل</p>
+                                  <img src={gatewayQR} alt="WhatsApp QR Code" className="w-48 h-48" />
+                                  <p className="text-xs text-slate-500 mt-2">WhatsApp → الإعدادات → الأجهزة المرتبطة → ربط جهاز</p>
+                                </div>
+                              )}
+
+                              {/* Action Buttons */}
+                              <div className="flex gap-2">
+                                <Button
+                                  onClick={fetchGatewayStatus}
+                                  disabled={loadingGateway}
+                                  variant="outline"
+                                  size="sm"
+                                  className="flex-1"
+                                >
+                                  {loadingGateway ? 'جاري التحديث...' : 'تحديث الحالة'}
+                                </Button>
+                                <Button
+                                  onClick={handleReconnectGateway}
+                                  disabled={loadingGateway}
+                                  variant="outline"
+                                  size="sm"
+                                  className="flex-1"
+                                >
+                                  إعادة الاتصال
+                                </Button>
+                              </div>
+
+                              {gatewayStatus?.error && (
+                                <p className="text-xs text-red-500 mt-2">{gatewayStatus.error}</p>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Test Connection */}
+                          <div className="flex items-end gap-2 pt-2 border-t">
+                            <div className="flex-1">
+                              <Label>رقم الهاتف للاختبار</Label>
+                              <Input
+                                value={testPhone}
+                                onChange={(e) => setTestPhone(e.target.value)}
+                                placeholder="01xxxxxxxxx"
+                                className="mt-1"
+                              />
+                            </div>
+                            <Button
+                              onClick={handleTestWhatsApp}
+                              disabled={testingWhatsApp}
+                              variant="outline"
+                              className="border-green-500 text-green-600 hover:bg-green-50"
+                            >
+                              {testingWhatsApp ? 'جاري الاختبار...' : 'إرسال رسالة اختبار'}
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Reminder Settings */}
+                        <div className="p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200 space-y-3">
+                          <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                            <Bell className="h-4 w-4" />
+                            إعدادات التذكيرات
+                          </h3>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div className="flex items-center justify-between p-3 bg-white rounded-lg border">
+                              <span className="text-sm">تذكير قبل 7 أيام</span>
+                              <Switch
+                                checked={whatsappSettings.reminder_7_days_enabled}
+                                onCheckedChange={(checked) => setWhatsappSettings({ ...whatsappSettings, reminder_7_days_enabled: checked })}
+                              />
+                            </div>
+                            <div className="flex items-center justify-between p-3 bg-white rounded-lg border">
+                              <span className="text-sm">تذكير قبل 3 أيام</span>
+                              <Switch
+                                checked={whatsappSettings.reminder_3_days_enabled}
+                                onCheckedChange={(checked) => setWhatsappSettings({ ...whatsappSettings, reminder_3_days_enabled: checked })}
+                              />
+                            </div>
+                            <div className="flex items-center justify-between p-3 bg-white rounded-lg border">
+                              <span className="text-sm">تذكير يوم الاستحقاق</span>
+                              <Switch
+                                checked={whatsappSettings.reminder_due_day_enabled}
+                                onCheckedChange={(checked) => setWhatsappSettings({ ...whatsappSettings, reminder_due_day_enabled: checked })}
+                              />
+                            </div>
+                            <div className="flex items-center justify-between p-3 bg-white rounded-lg border">
+                              <span className="text-sm">تنبيه التأخير</span>
+                              <Switch
+                                checked={whatsappSettings.reminder_overdue_enabled}
+                                onCheckedChange={(checked) => setWhatsappSettings({ ...whatsappSettings, reminder_overdue_enabled: checked })}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Message Templates */}
+                        <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 rounded-xl border border-amber-200 space-y-4">
+                          <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                            <FileText className="h-4 w-4" />
+                            قوالب الرسائل
+                          </h3>
+                          <p className="text-xs text-slate-500">المتغيرات المتاحة: {'{clinic_name}'}, {'{installment_number}'}, {'{amount}'}, {'{due_date}'}, {'{days_overdue}'}, {'{remaining}'}</p>
+
+                          <div>
+                            <Label>رسالة التذكير</Label>
+                            <Textarea
+                              value={whatsappSettings.template_reminder}
+                              onChange={(e) => setWhatsappSettings({ ...whatsappSettings, template_reminder: e.target.value })}
+                              rows={3}
+                              className="mt-1"
+                              dir="rtl"
+                            />
+                          </div>
+                          <div>
+                            <Label>رسالة التأخير</Label>
+                            <Textarea
+                              value={whatsappSettings.template_overdue}
+                              onChange={(e) => setWhatsappSettings({ ...whatsappSettings, template_overdue: e.target.value })}
+                              rows={3}
+                              className="mt-1"
+                              dir="rtl"
+                            />
+                          </div>
+                          <div>
+                            <Label>رسالة تأكيد الدفع</Label>
+                            <Textarea
+                              value={whatsappSettings.template_payment_confirmation}
+                              onChange={(e) => setWhatsappSettings({ ...whatsappSettings, template_payment_confirmation: e.target.value })}
+                              rows={3}
+                              className="mt-1"
+                              dir="rtl"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Save Button */}
+                        <Button
+                          onClick={handleWhatsAppSettingsUpdate}
+                          disabled={savingWhatsApp}
+                          className="w-full bg-green-600 hover:bg-green-700 rounded-full"
+                        >
+                          {savingWhatsApp ? 'جاري الحفظ...' : 'حفظ إعدادات WhatsApp'}
+                        </Button>
+                      </>
+                    )}
+                  </>
+                )}
               </TabsContent>
             </Tabs>
 

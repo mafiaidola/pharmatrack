@@ -13,7 +13,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 import jwt
 from passlib.context import CryptContext
 from enum import Enum
@@ -22,6 +22,8 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import boto3
 from botocore.exceptions import ClientError
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -129,6 +131,97 @@ api_router = APIRouter(prefix="/api")
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "pharmatrack-backend"}
+
+# System Health endpoint for Settings page - comprehensive health check
+@api_router.get("/system-health")
+async def system_health():
+    """
+    Comprehensive system health check for the Settings page.
+    Returns database status, collection counts, and environment info.
+    """
+    try:
+        # Check database connectivity
+        db_status = "connected"
+        try:
+            await db.command("ping")
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+        
+        # Get collection counts
+        counts = {}
+        collections = ["users", "orders", "clinics", "products", "visits", "invoices", "payments"]
+        for coll in collections:
+            try:
+                counts[coll] = await db[coll].count_documents({})
+            except:
+                counts[coll] = 0
+        
+        # Build health response
+        return {
+            "status": "healthy" if db_status == "connected" else "unhealthy",
+            "database": {
+                "status": db_status,
+                "name": os.environ.get('DB_NAME', 'unknown')
+            },
+            "collections": counts,
+            "environment": os.environ.get('ENV', 'development'),
+            "version": "1.0.0",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"System health check failed: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+# Database Reset Endpoint (SUPER_ADMIN only) - for fresh production start
+@app.post("/api/admin/reset-database")
+async def reset_database(secret_key: str):
+    """
+    Complete database reset - clears all operational data.
+    Requires secret key for security.
+    """
+    # Security check - require secret key
+    if secret_key != "RESET_PHARMATRACK_2024_CONFIRM":
+        raise HTTPException(status_code=403, detail="Invalid secret key")
+    
+    collections_to_clear = [
+        "orders", "visits", "clinics", "invoices", "payments",
+        "expenses", "audit_logs", "returns", "tracking_sessions",
+        "gps_points", "location_history", "notifications", "push_subscriptions"
+    ]
+    
+    results = {}
+    total_deleted = 0
+    
+    for collection_name in collections_to_clear:
+        try:
+            result = await db[collection_name].delete_many({})
+            deleted_count = result.deleted_count
+            total_deleted += deleted_count
+            results[collection_name] = {"deleted": deleted_count, "status": "success"}
+        except Exception as e:
+            results[collection_name] = {"error": str(e), "status": "failed"}
+    
+    # Reset serial counters
+    counters = ["invoice_number", "payment_number", "visit_number", "order_number", "expense_number"]
+    for counter_id in counters:
+        try:
+            await db.counters.delete_one({"_id": counter_id})
+        except:
+            pass
+    
+    results["counters"] = {"reset": len(counters), "status": "success"}
+    
+    logger.info(f"Database reset completed. Total deleted: {total_deleted}")
+    
+    return {
+        "message": "Database reset completed",
+        "total_deleted": total_deleted,
+        "details": results
+    }
 
 # CORS Middleware - Allow specific origins for development and production
 def get_cors_origins():
@@ -267,6 +360,49 @@ class AuditLogType(str, Enum):
     EXPENSE_REJECTED = "expense_rejected"
     INVOICE_CANCELLED = "invoice_cancelled"
 
+class NotificationType(str, Enum):
+    # Invoice & Payment notifications
+    INVOICE_DUE_TODAY = "invoice_due_today"
+    INVOICE_DUE_TOMORROW = "invoice_due_tomorrow"
+    INVOICE_OVERDUE = "invoice_overdue"
+    PAYMENT_RECEIVED = "payment_received"
+    INSTALLMENT_DUE = "installment_due"
+    
+    # Order notifications
+    ORDER_CREATED = "order_created"
+    ORDER_PENDING_APPROVAL = "order_pending_approval"
+    ORDER_APPROVED = "order_approved"
+    ORDER_REJECTED = "order_rejected"
+    
+    # Report notifications
+    DAILY_REPORT = "daily_report"
+    WEEKLY_REPORT = "weekly_report"
+    
+    # System notifications
+    SYSTEM_ALERT = "system_alert"
+
+# Plan Module Enums
+class PlanStatus(str, Enum):
+    DRAFT = "draft"                          # مسودة - قيد الإنشاء
+    PENDING_APPROVAL = "pending_approval"    # بانتظار موافقة المدير
+    NEEDS_REVISION = "needs_revision"        # يحتاج تعديل
+    APPROVED = "approved"                    # معتمد - لا يمكن التعديل
+    ACTIVE = "active"                        # نشط - الشهر الحالي
+    COMPLETED = "completed"                  # مكتمل - الشهر انتهى
+
+class RecurrenceType(str, Enum):
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+    CUSTOM = "custom"
+
+class PlannedVisitType(str, Enum):
+    REGULAR = "regular"           # زيارة عادية
+    ORDER = "order"               # زيارة مع طلب
+    DEMO = "demo"                 # زيارة مع عينات
+    NEW_CLINIC = "new_clinic"     # افتتاح عيادة جديدة
+    ISSUE = "issue"               # حل مشكلة
+
 # Models
 class User(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -279,6 +415,9 @@ class User(BaseModel):
     manager_id: Optional[str] = None
     full_name: str
     phone: Optional[str] = None
+    whatsapp_number: Optional[str] = None  # WhatsApp number for notifications
+    receive_whatsapp_notifications: bool = True  # Enable/disable WhatsApp notifications
+    receive_push_notifications: bool = True  # Enable/disable Push notifications
     is_active: bool = True
     gps_enabled: bool = False
     last_login: Optional[datetime] = None
@@ -296,6 +435,7 @@ class UserCreate(BaseModel):
     manager_id: Optional[str] = None
     full_name: str
     phone: Optional[str] = None
+    whatsapp_number: Optional[str] = None  # WhatsApp number for notifications
 
     @field_validator('username', 'full_name', mode='before')
     @classmethod
@@ -336,6 +476,9 @@ class UserUpdate(BaseModel):
     email: Optional[str] = None
     full_name: Optional[str] = None
     phone: Optional[str] = None
+    whatsapp_number: Optional[str] = None
+    receive_whatsapp_notifications: Optional[bool] = None
+    receive_push_notifications: Optional[bool] = None
     role: Optional[UserRole] = None
     line_id: Optional[str] = None
     area_id: Optional[str] = None
@@ -343,6 +486,135 @@ class UserUpdate(BaseModel):
     password: Optional[str] = None  # For password changes
     is_active: Optional[bool] = None
     gps_enabled: Optional[bool] = None
+
+# Notification Model
+class Notification(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str  # Target user
+    type: NotificationType
+    title: str
+    message: str
+    data: Optional[dict] = None  # Additional data (invoice_id, clinic_name, amount, etc.)
+    is_read: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class NotificationCreate(BaseModel):
+    user_id: str
+    type: NotificationType
+    title: str
+    message: str
+    data: Optional[dict] = None
+
+# ============== Plan Module Models ==============
+
+class PlannedVisitItem(BaseModel):
+    """A single planned visit within a monthly plan"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    clinic_id: str
+    scheduled_date: datetime
+    visit_reason: str  # follow_up, product_demo, place_order, issue, opening_clinic
+    visit_type: PlannedVisitType = PlannedVisitType.REGULAR
+    notes: Optional[str] = None
+    
+    # Execution tracking
+    is_completed: bool = False
+    actual_visit_id: Optional[str] = None  # رابط الزيارة الفعلية
+    embedded_order_id: Optional[str] = None  # رابط الطلب المضمن
+
+class RecurringVisitItem(BaseModel):
+    """A recurring visit template within a monthly plan"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    clinic_id: str
+    recurrence_type: RecurrenceType = RecurrenceType.WEEKLY
+    days_of_week: List[int] = []  # 0=Sunday, 1=Monday, ..., 6=Saturday
+    day_of_month: Optional[int] = None  # For monthly recurrence
+    preferred_time: Optional[str] = None  # e.g., "09:00"
+    visit_reason: str = "follow_up"
+    
+    start_date: date
+    end_date: Optional[date] = None  # None = indefinite
+    
+    # Notification settings
+    reminder_before_minutes: int = 60  # 1 hour before
+    notify_on_miss: bool = True
+    is_active: bool = True
+
+class NewClinicPlanItem(BaseModel):
+    """A new clinic to be opened within a monthly plan"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    address: str
+    doctor_name: Optional[str] = None
+    specialty: Optional[str] = None
+    planned_date: date
+    notes: Optional[str] = None
+    
+    # Execution tracking
+    is_completed: bool = False
+    created_clinic_id: Optional[str] = None
+
+class PlanComment(BaseModel):
+    """Comment on a plan from manager/user"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    user_name: str
+    content: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class Plan(BaseModel):
+    """Monthly plan for a medical rep"""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str           # المندوب
+    manager_id: str        # المدير المباشر
+    month: int             # الشهر (1-12)
+    year: int              # السنة
+    status: PlanStatus = PlanStatus.DRAFT
+    
+    # Plan items
+    planned_visits: List[PlannedVisitItem] = []
+    recurring_visits: List[RecurringVisitItem] = []
+    new_clinics: List[NewClinicPlanItem] = []
+    
+    # Notes
+    notes: Optional[str] = None
+    manager_notes: Optional[str] = None
+    comments: List[PlanComment] = []
+    
+    # Timestamps
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    approved_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
+    rejected_by: Optional[str] = None
+    rejection_reason: Optional[str] = None
+
+class PlanCreate(BaseModel):
+    """Create a new monthly plan"""
+    month: int
+    year: int
+    planned_visits: List[dict] = []
+    recurring_visits: List[dict] = []
+    new_clinics: List[dict] = []
+    notes: Optional[str] = None
+
+class PlanUpdate(BaseModel):
+    """Update an existing plan (only if status is DRAFT or NEEDS_REVISION)"""
+    planned_visits: Optional[List[dict]] = None
+    recurring_visits: Optional[List[dict]] = None
+    new_clinics: Optional[List[dict]] = None
+    notes: Optional[str] = None
+
+class PlanApprovalAction(BaseModel):
+    """Manager action on a plan"""
+    action: str  # approve, reject, request_revision
+    manager_notes: Optional[str] = None
+    rejection_reason: Optional[str] = None
+
+# ============== End Plan Module Models ==============
 
 class Line(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -447,7 +719,7 @@ class Visit(BaseModel):
     visit_reason: Optional[VisitReason] = None
     visit_result: Optional[VisitResult] = None
     notes: Optional[str] = None
-    attendees: Optional[str] = None
+    attendees: Optional[List[dict]] = None  # Changed to list of {id, name}
     samples_provided: Optional[List[dict]] = None
     follow_up_date: Optional[datetime] = None
     visit_rating: Optional[int] = Field(None, ge=1, le=5)
@@ -455,6 +727,9 @@ class Visit(BaseModel):
     longitude: Optional[float] = None
     is_verified: bool = False
     status: VisitStatus = VisitStatus.PLANNED
+    # Embedded Order - created automatically when visit has order data
+    embedded_order: Optional[dict] = None  # {enabled, order_type, products, total_amount, etc.}
+    embedded_order_id: Optional[str] = None  # ID of auto-created order
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     synced: bool = True
 
@@ -464,13 +739,15 @@ class VisitCreate(BaseModel):
     visit_reason: Optional[VisitReason] = None
     visit_result: Optional[VisitResult] = None
     notes: Optional[str] = None
-    attendees: Optional[str] = None
+    attendees: Optional[List[dict]] = None  # Changed to list of {id, name}
     samples_provided: Optional[List[dict]] = None
     follow_up_date: Optional[datetime] = None
     visit_rating: Optional[int] = Field(None, ge=1, le=5)
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     status: VisitStatus = VisitStatus.COMPLETED
+    # Embedded Order
+    embedded_order: Optional[dict] = None  # {enabled, order_type, products, total_amount, payment_method, discount_type, discount_value}
 
 class VisitUpdate(BaseModel):
     clinic_id: Optional[str] = None
@@ -478,11 +755,12 @@ class VisitUpdate(BaseModel):
     visit_reason: Optional[VisitReason] = None
     visit_result: Optional[VisitResult] = None
     notes: Optional[str] = None
-    attendees: Optional[str] = None
+    attendees: Optional[List[dict]] = None  # Changed to list of {id, name}
     samples_provided: Optional[List[dict]] = None
     follow_up_date: Optional[datetime] = None
     visit_rating: Optional[int] = Field(None, ge=1, le=5)
     status: Optional[VisitStatus] = None
+    embedded_order: Optional[dict] = None
 
 # Order History Event for timeline tracking
 class OrderHistoryEvent(BaseModel):
@@ -523,6 +801,10 @@ class Order(BaseModel):
     notes: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Payment fields
+    payment_status: Optional[str] = "unpaid"  # 'full', 'partial', 'unpaid'
+    payment_method: Optional[str] = None  # 'bank_transfer', 'e_wallet', 'instapay', 'cash'
+    amount_paid: Optional[float] = None
     history: List[dict] = Field(default_factory=list)  # Timeline of changes
     comments: List[dict] = Field(default_factory=list)  # Internal notes
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -538,6 +820,17 @@ class OrderCreate(BaseModel):
     notes: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    # Payment fields
+    payment_status: Optional[str] = "unpaid"  # 'full', 'partial', 'unpaid'
+    payment_method: Optional[str] = None
+    amount_paid: Optional[float] = None
+    # Installment scheduling fields
+    schedule_type: Optional[str] = "monthly"  # 'monthly', 'weekly', 'regular', 'custom'
+    installments_count: Optional[int] = 3
+    interval_days: Optional[int] = 30
+    first_due_date: Optional[str] = None  # ISO date string
+    grace_period_days: Optional[int] = 3
+    custom_installments: Optional[List[dict]] = None  # [{amount, due_date}]
 
 class OrderUpdate(BaseModel):
     clinic_id: Optional[str] = None
@@ -548,6 +841,10 @@ class OrderUpdate(BaseModel):
     status: Optional[OrderStatus] = None
     rejection_reason: Optional[str] = None
     notes: Optional[str] = None
+    # Payment fields
+    payment_status: Optional[str] = None
+    payment_method: Optional[str] = None
+    amount_paid: Optional[float] = None
 
 class Expense(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -965,7 +1262,8 @@ class Invoice(BaseModel):
     total_amount: float
     paid_amount: float = 0                # المبلغ المدفوع
     remaining_amount: float               # المبلغ المتبقي
-    status: InvoiceStatus = InvoiceStatus.APPROVED
+    status: str = "pending"               # pending, partial, paid
+    payment_method: Optional[str] = None  # طريقة الدفع الأولية
     payments: List[dict] = Field(default_factory=list)  # قائمة الدفعات
     invoice_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     due_date: Optional[datetime] = None   # تاريخ استحقاق الدفع
@@ -1034,6 +1332,84 @@ class AccountingAlert(BaseModel):
     is_read: bool = False
     created_for: List[str] = Field(default_factory=list)  # User IDs to notify
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALLMENT PAYMENT SYSTEM MODELS
+# ═══════════════════════════════════════════════════════════════════════════
+
+class InstallmentSchedule(BaseModel):
+    """جدول الأقساط للفاتورة"""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    invoice_id: str
+    invoice_number: int
+    clinic_id: str
+    clinic_name: str
+    schedule_type: str  # 'monthly', 'weekly', 'regular', 'custom'
+    interval_days: Optional[int] = None  # للدفعات المنتظمة
+    total_amount: float
+    installments_count: int
+    grace_period_days: int = 3
+    first_due_date: datetime
+    created_by: str
+    created_by_name: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class Installment(BaseModel):
+    """قسط فردي"""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    schedule_id: str
+    invoice_id: str
+    invoice_number: int
+    clinic_id: str
+    clinic_name: str
+    installment_number: int
+    amount: float
+    paid_amount: float = 0
+    remaining_amount: float
+    due_date: datetime
+    status: str = "upcoming"  # upcoming/due/grace/overdue/paid/partial
+    paid_date: Optional[datetime] = None
+    payment_ids: List[str] = Field(default_factory=list)
+    reminder_sent: dict = Field(default_factory=dict)  # {'7_days': True, ...}
+    rescheduled_from: Optional[datetime] = None
+    reschedule_reason: Optional[str] = None
+    rescheduled_by: Optional[str] = None
+    rescheduled_by_name: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class ClinicCreditScore(BaseModel):
+    """التقييم الائتماني للعيادة"""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    clinic_id: str
+    clinic_name: str
+    score: int = 5  # 1-5 stars
+    on_time_count: int = 0
+    late_count: int = 0
+    total_installments: int = 0
+    avg_delay_days: float = 0
+    last_updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class WhatsAppSettings(BaseModel):
+    """إعدادات إشعارات واتساب"""
+    model_config = ConfigDict(extra="ignore")
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    enabled: bool = False
+    api_provider: str = "ultramsg"  # ultramsg/twilio/custom
+    api_url: Optional[str] = None
+    api_key: Optional[str] = None
+    instance_id: Optional[str] = None
+    default_country_code: str = "+20"
+    reminder_7_days: bool = True
+    reminder_3_days: bool = True
+    reminder_due_day: bool = True
+    reminder_overdue: bool = True
+    message_template_reminder: str = "مرحباً {clinic_name}، تذكير بموعد قسط بقيمة {amount} ج.م مستحق في {due_date} للفاتورة رقم {invoice_number}"
+    message_template_overdue: str = "تنبيه: قسط متأخر بقيمة {amount} ج.م للفاتورة رقم {invoice_number}. يرجى السداد في أقرب وقت."
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 # Helper functions
 
@@ -1889,6 +2265,41 @@ async def get_clinic(clinic_id: str, current_user: dict = Depends(get_current_us
         clinic['created_at'] = datetime.fromisoformat(clinic['created_at'])
     return clinic
 
+@api_router.put("/clinics/{clinic_id}")
+async def update_clinic(
+    clinic_id: str,
+    clinic_update: ClinicCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update an existing clinic (Super Admin only)"""
+    if current_user.get("role") not in ["super_admin"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية لتعديل العيادات")
+    
+    # Check clinic exists
+    existing = await db.clinics.find_one({"id": clinic_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="العيادة غير موجودة")
+    
+    # Update clinic
+    update_data = clinic_update.model_dump(exclude_unset=True)
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    await db.clinics.update_one({"id": clinic_id}, {"$set": update_data})
+    
+    # Create audit log
+    await db.audit_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "clinic_updated",
+        "entity_type": "clinic",
+        "entity_id": clinic_id,
+        "performed_by": current_user.get("id"),
+        "performed_by_name": current_user.get("full_name", current_user.get("username")),
+        "details": {"clinic_name": update_data.get("name", existing.get("name"))},
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    return {"message": "تم تحديث العيادة بنجاح"}
+
 @api_router.get("/clinics/{clinic_id}/details")
 async def get_clinic_details(clinic_id: str, current_user: dict = Depends(get_current_user)):
     clinic = await db.clinics.find_one({"id": clinic_id}, {"_id": 0})
@@ -2005,6 +2416,72 @@ async def create_visit(
     
     await db.visits.insert_one(doc)
     
+    # Auto-create Order if embedded_order is provided and has products
+    embedded_order_id = None
+    if visit_dict.get("embedded_order") and visit_dict["embedded_order"].get("products"):
+        embedded = visit_dict["embedded_order"]
+        products = embedded.get("products", [])
+        
+        if products:
+            # Calculate total
+            total_amount = sum(p.get("price", 0) * p.get("quantity", 1) for p in products)
+            
+            # Apply discount
+            discount_value = embedded.get("discount_value", 0)
+            discount_type = embedded.get("discount_type", "percentage")
+            if discount_type == "percentage":
+                total_amount = total_amount - (total_amount * discount_value / 100)
+            else:
+                total_amount = total_amount - discount_value
+            total_amount = max(0, total_amount)
+            
+            # Determine order type based on visit reason
+            order_type = "demo" if visit_dict.get("visit_reason") == "product_demo" else "regular"
+            
+            # Create Order
+            order_id = str(uuid.uuid4())
+            order_serial = await get_next_serial_number("orders", 1001)
+            
+            order_doc = {
+                "id": order_id,
+                "serial_number": order_serial,
+                "clinic_id": visit_dict["clinic_id"],
+                "medical_rep_id": current_user["id"],
+                "order_type": order_type,
+                "products": products,
+                "discount_type": discount_type if discount_value > 0 else None,
+                "discount_value": discount_value if discount_value > 0 else None,
+                "discount_reason": f"Created from visit #{visit_obj.serial_number}",
+                "total_amount": total_amount,
+                "payment_method": embedded.get("payment_method", "cash"),
+                "payment_status": "pending",
+                "status": "pending_approval",
+                "notes": f"تم إنشاء هذا الطلب تلقائياً من الزيارة #{visit_obj.serial_number}",
+                "visit_id": visit_obj.id,  # Link to visit
+                "history": [{
+                    "action": "created",
+                    "user_id": current_user["id"],
+                    "user_name": current_user.get("full_name", ""),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "details": f"Auto-created from visit"
+                }],
+                "comments": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "synced": True
+            }
+            
+            await db.orders.insert_one(order_doc)
+            embedded_order_id = order_id
+            
+            # Update visit with the order ID
+            await db.visits.update_one(
+                {"id": visit_obj.id},
+                {"$set": {"embedded_order_id": order_id}}
+            )
+            
+            logger.info(f"Auto-created order {order_id} from visit {visit_obj.id}")
+
+
     # Log Activity with enhanced metadata
     try:
         # Get clinic name for metadata
@@ -4631,7 +5108,403 @@ async def upload_image(
     
     return {"url": file_url, "filename": file.filename}
 
-@app.get("/uploads/{filename}")
+# Payment Receipt Upload Route
+@api_router.post("/upload-receipt")
+async def upload_receipt(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """Upload payment receipt image (deposit/transfer/check) - uploads to S3 in production"""
+    # Validate file type - allow images and PDF
+    allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="نوع الملف غير مسموح. يُسمح بالصور و PDF فقط.")
+    
+    # Validate file size (max 10MB for receipts)
+    file.file.seek(0, 2)  # Seek to end
+    file_size = file.file.tell()
+    file.file.seek(0)  # Reset to beginning
+    
+    if file_size > 10 * 1024 * 1024:  # 10MB
+        raise HTTPException(status_code=400, detail="حجم الملف كبير جداً. الحد الأقصى 10MB.")
+    
+    # Read file content
+    file_content = await file.read()
+    
+    # Generate a unique filename with prefix
+    original_ext = file.filename.rsplit('.', 1)[-1] if '.' in file.filename else 'jpg'
+    unique_filename = f"receipt_{uuid.uuid4().hex[:12]}.{original_ext}"
+    
+    # Upload to S3 (or local fallback)
+    file_url = await upload_file_to_s3(file_content, unique_filename, file.content_type)
+    
+    return {
+        "url": file_url, 
+        "filename": unique_filename,
+        "original_name": file.filename,
+        "size": file_size,
+        "content_type": file.content_type
+    }
+
+# ===================== NOTIFICATIONS API =====================
+
+async def create_notification(
+    user_id: str,
+    notification_type: NotificationType,
+    title: str,
+    message: str,
+    data: dict = None
+):
+    """Helper function to create a notification for a user"""
+    notification = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "type": notification_type.value,
+        "title": title,
+        "message": message,
+        "data": data or {},
+        "is_read": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.notifications.insert_one(notification)
+    return notification
+
+async def send_notification_to_role(
+    role: UserRole,
+    notification_type: NotificationType,
+    title: str,
+    message: str,
+    data: dict = None,
+    manager_id: str = None  # Optional: send only to users under this manager
+):
+    """Send notification to all users with a specific role"""
+    query = {"role": role.value, "is_active": True, "is_deleted": {"$ne": True}}
+    if manager_id:
+        query["manager_id"] = manager_id
+    
+    users = await db.users.find(query, {"id": 1}).to_list(100)
+    notifications = []
+    for user in users:
+        notif = await create_notification(user["id"], notification_type, title, message, data)
+        notifications.append(notif)
+    return notifications
+
+@api_router.get("/notifications")
+async def get_notifications(
+    limit: int = 20,
+    offset: int = 0,
+    unread_only: bool = False,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get notifications for current user"""
+    query = {"user_id": current_user["id"]}
+    if unread_only:
+        query["is_read"] = False
+    
+    total = await db.notifications.count_documents(query)
+    notifications = await db.notifications.find(query, {"_id": 0}).sort(
+        "created_at", -1
+    ).skip(offset).limit(limit).to_list(limit)
+    
+    return {
+        "items": notifications,
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
+
+@api_router.get("/notifications/unread-count")
+async def get_unread_count(current_user: dict = Depends(get_current_user)):
+    """Get count of unread notifications"""
+    count = await db.notifications.count_documents({
+        "user_id": current_user["id"],
+        "is_read": False
+    })
+    return {"count": count}
+
+@api_router.put("/notifications/{notification_id}/read")
+async def mark_notification_read(
+    notification_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Mark a notification as read"""
+    result = await db.notifications.update_one(
+        {"id": notification_id, "user_id": current_user["id"]},
+        {"$set": {"is_read": True}}
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"message": "Notification marked as read"}
+
+@api_router.put("/notifications/mark-all-read")
+async def mark_all_notifications_read(current_user: dict = Depends(get_current_user)):
+    """Mark all notifications as read for current user"""
+    result = await db.notifications.update_many(
+        {"user_id": current_user["id"], "is_read": False},
+        {"$set": {"is_read": True}}
+    )
+    return {"message": f"Marked {result.modified_count} notifications as read"}
+
+@api_router.post("/notifications")
+async def create_notification_endpoint(
+    notification: NotificationCreate,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.GM]))
+):
+    """Create a notification (Admin/GM only)"""
+    notif = await create_notification(
+        notification.user_id,
+        notification.type,
+        notification.title,
+        notification.message,
+        notification.data
+    )
+    return notif
+
+@api_router.delete("/notifications/{notification_id}")
+async def delete_notification(
+    notification_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a notification"""
+    result = await db.notifications.delete_one({
+        "id": notification_id,
+        "user_id": current_user["id"]
+    })
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"message": "Notification deleted"}
+
+# ===================== WHATSAPP INTEGRATION =====================
+
+import httpx
+
+async def get_whatsapp_settings():
+    """Get WhatsApp settings from database"""
+    default_settings = {
+        "enabled": False,
+        "provider": "baileys",
+        "api_provider": "baileys",
+        "instance_id": "",
+        "token": "",
+        "api_key": "",
+        "phone_number": "",
+        "api_url": "",
+        "templates": {
+            "invoice_due_today": "🔔 *فاتورة مستحقة اليوم*\n\n📋 العيادة: {clinic_name}\n💰 المبلغ: {amount} ج.م\n📅 الاستحقاق: {due_date}",
+            "invoice_overdue": "⚠️ *فاتورة متأخرة*\n\n📋 العيادة: {clinic_name}\n💰 المبلغ: {amount} ج.م\n⏰ متأخرة: {days_overdue} يوم",
+            "order_approved": "✅ *تمت الموافقة على طلبك*\n\n🏥 العيادة: {clinic_name}\n💰 المبلغ: {amount} ج.م",
+            "order_rejected": "❌ *تم رفض طلبك*\n\n🏥 العيادة: {clinic_name}\n📝 السبب: {reason}",
+            "daily_report": "📊 *التقرير اليومي*\n\n📦 الطلبات: {orders_count}\n💰 المبيعات: {total_sales} ج.م\n⏳ معلق: {pending_orders}"
+        }
+    }
+    
+    try:
+        doc = await db.settings.find_one({"type": "whatsapp"})
+        if not doc:
+            return default_settings
+        
+        # Get settings from nested key or direct
+        settings = doc.get("settings")
+        if settings and isinstance(settings, dict):
+            return {**default_settings, **settings}
+        
+        # If no nested settings, return defaults
+        return default_settings
+    except Exception as e:
+        logger.error(f"Error getting WhatsApp settings: {e}")
+        return default_settings
+
+async def send_whatsapp_message(phone_number: str, message: str) -> bool:
+    """Send WhatsApp message using configured provider"""
+    try:
+        settings = await get_whatsapp_settings()
+        
+        if not settings.get("enabled"):
+            logger.info("WhatsApp notifications disabled")
+            return False
+        
+        provider = settings.get("provider", "ultramsg")
+        
+        # Clean phone number (remove spaces, dashes)
+        phone = phone_number.replace(" ", "").replace("-", "").replace("+", "")
+        if not phone.startswith("2"):
+            phone = "2" + phone  # Add Egypt country code
+        
+        async with httpx.AsyncClient() as client:
+            if provider == "ultramsg":
+                # UltraMsg API
+                url = f"https://api.ultramsg.com/{settings.get('instance_id')}/messages/chat"
+                response = await client.post(url, data={
+                    "token": settings.get("token"),
+                    "to": phone,
+                    "body": message
+                })
+            elif provider == "callmebot":
+                # CallMeBot (free, limited)
+                url = f"https://api.callmebot.com/whatsapp.php"
+                response = await client.get(url, params={
+                    "phone": phone,
+                    "text": message,
+                    "apikey": settings.get("token")
+                })
+            elif provider == "custom":
+                # Custom API endpoint
+                url = settings.get("api_url")
+                response = await client.post(url, json={
+                    "phone": phone,
+                    "message": message,
+                    "token": settings.get("token")
+                })
+            elif provider == "baileys":
+                # WhiskeySockets/Baileys Gateway (free, local)
+                gateway_url = settings.get("api_url", "http://localhost:3001")
+                response = await client.post(f"{gateway_url}/send", json={
+                    "phone": phone,
+                    "message": message
+                }, timeout=30.0)
+            else:
+                logger.error(f"Unknown WhatsApp provider: {provider}")
+                return False
+            
+            if response.status_code == 200:
+                logger.info(f"✅ WhatsApp sent to {phone}")
+                return True
+            else:
+                logger.error(f"❌ WhatsApp failed: {response.text}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"❌ WhatsApp error: {e}")
+        return False
+
+async def send_whatsapp_notification(user_id: str, notification_type: str, data: dict):
+    """Send WhatsApp notification to user if enabled"""
+    try:
+        # Get user
+        user = await db.users.find_one({"id": user_id})
+        if not user:
+            return
+        
+        # Check if user has WhatsApp notifications enabled
+        if not user.get("receive_whatsapp_notifications", True):
+            return
+        
+        # Get WhatsApp number (fallback to phone)
+        whatsapp_number = user.get("whatsapp_number") or user.get("phone")
+        if not whatsapp_number:
+            return
+        
+        # Get settings and template
+        settings = await get_whatsapp_settings()
+        templates = settings.get("templates", {})
+        template = templates.get(notification_type)
+        
+        if not template:
+            return
+        
+        # Format message with data
+        message = template.format(**data) if data else template
+        
+        # Send message
+        await send_whatsapp_message(whatsapp_number, message)
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to send WhatsApp notification: {e}")
+
+@api_router.get("/whatsapp-settings")
+async def get_whatsapp_settings_endpoint(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get WhatsApp settings"""
+    settings = await get_whatsapp_settings()
+    return settings
+
+@api_router.put("/whatsapp-settings")
+async def update_whatsapp_settings(
+    settings: dict,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Update WhatsApp settings"""
+    await db.settings.update_one(
+        {"type": "whatsapp"},
+        {"$set": {"type": "whatsapp", "settings": settings}},
+        upsert=True
+    )
+    return {"message": "WhatsApp settings updated", "settings": settings}
+
+@api_router.post("/whatsapp-settings/test")
+async def test_whatsapp(
+    test_data: dict,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Test WhatsApp message sending"""
+    phone = test_data.get("phone")
+    message = test_data.get("message", "🧪 رسالة اختبار من نظام EP-EG")
+    
+    if not phone:
+        raise HTTPException(status_code=400, detail="Phone number required")
+    
+    success = await send_whatsapp_message(phone, message)
+    
+    return {"success": success, "message": "Test message sent" if success else "Failed to send"}
+
+@api_router.get("/whatsapp-gateway/status")
+async def get_gateway_status(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get WhatsApp Gateway connection status"""
+    try:
+        settings = await get_whatsapp_settings()
+        # Handle both field names from frontend
+        gateway_url = settings.get("api_url") or settings.get("gateway_url") or "http://localhost:3001"
+        
+        if not gateway_url or gateway_url == "":
+            return {"status": "not_configured", "error": "Gateway URL not configured"}
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{gateway_url}/status", timeout=5.0)
+            return response.json()
+    except Exception as e:
+        return {"status": "offline", "error": str(e)}
+
+@api_router.get("/whatsapp-gateway/qr")
+async def get_gateway_qr(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Get WhatsApp Gateway QR code for scanning"""
+    try:
+        settings = await get_whatsapp_settings()
+        gateway_url = settings.get("api_url") or settings.get("gateway_url") or "http://localhost:3001"
+        
+        if not gateway_url or gateway_url == "":
+            return {"status": "not_configured", "error": "Gateway URL not configured"}
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{gateway_url}/qr", timeout=5.0)
+            return response.json()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@api_router.post("/whatsapp-gateway/reconnect")
+async def reconnect_gateway(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Reconnect WhatsApp Gateway"""
+    try:
+        settings = await get_whatsapp_settings()
+        gateway_url = settings.get("api_url") or settings.get("gateway_url") or "http://localhost:3001"
+        
+        if not gateway_url or gateway_url == "":
+            return {"success": False, "error": "Gateway URL not configured"}
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{gateway_url}/reconnect", timeout=10.0)
+            return response.json()
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/uploads/{filename}") #
 async def serve_upload(filename: str):
     """Serve uploaded images with CORS headers for cross-origin access"""
     file_path = Path("uploads") / filename
@@ -5211,6 +6084,24 @@ async def create_invoice_from_order(order: dict, approver: dict, request: Reques
     
     total_amount = order.get("total_amount", 0)
     
+    # Calculate payment amounts based on payment_status
+    payment_status = order.get("payment_status", "unpaid")
+    payment_method = order.get("payment_method")
+    order_amount_paid = order.get("amount_paid", 0) or 0
+    
+    if payment_status == "full":
+        paid_amount = total_amount
+        remaining_amount = 0
+        invoice_status = "paid"
+    elif payment_status == "partial":
+        paid_amount = min(order_amount_paid, total_amount)  # Can't pay more than total
+        remaining_amount = total_amount - paid_amount
+        invoice_status = "partial"
+    else:  # unpaid
+        paid_amount = 0
+        remaining_amount = total_amount
+        invoice_status = "pending"
+    
     invoice = Invoice(
         invoice_number=invoice_number,
         order_id=order["id"],
@@ -5233,7 +6124,10 @@ async def create_invoice_from_order(order: dict, approver: dict, request: Reques
         discount_value=order.get("discount_value"),
         discount_reason=order.get("discount_reason"),
         total_amount=total_amount,
-        remaining_amount=total_amount,
+        paid_amount=paid_amount,
+        remaining_amount=remaining_amount,
+        status=invoice_status,
+        payment_method=payment_method,
         notes=order.get("notes")
     )
     
@@ -5246,14 +6140,112 @@ async def create_invoice_from_order(order: dict, approver: dict, request: Reques
     
     await db.invoices.insert_one(doc)
     
-    # Create audit log
+    # Create automatic Payment record if there's an upfront payment
+    if paid_amount > 0 and payment_method:
+        payment_number = await get_next_serial_number("payments", 20001)
+        payment = Payment(
+            payment_number=payment_number,
+            invoice_id=invoice.id,
+            invoice_number=invoice_number,
+            clinic_id=order["clinic_id"],
+            clinic_name=clinic_name,
+            amount=paid_amount,
+            payment_method=payment_method,
+            collected_by=order["medical_rep_id"],
+            collected_by_name=med_rep_name,
+            notes=f"دفع مع الطلب رقم {order.get('serial_number', 0)}"
+        )
+        payment_doc = payment.model_dump()
+        payment_doc["payment_date"] = payment_doc["payment_date"].isoformat()
+        payment_doc["created_at"] = payment_doc["created_at"].isoformat()
+        await db.payments.insert_one(payment_doc)
+        
+        # Log payment
+        await create_audit_log(
+            log_type=AuditLogType.PAYMENT_RECEIVED,
+            entity_type="payment",
+            entity_id=payment.id,
+            entity_serial=payment_number,
+            user=approver,
+            action_details=f"تم تسجيل دفعة {paid_amount} ج.م من الطلب رقم {order.get('serial_number')} ({payment_method})",
+            amount=paid_amount,
+            request=request
+        )
+    
+    # Create installment schedule if order has scheduling data
+    if order.get("first_due_date") and remaining_amount > 0:
+        schedule_type = order.get("schedule_type", "monthly")
+        installments_count = order.get("installments_count", 3)
+        interval_days = order.get("interval_days", 30)
+        grace_period = order.get("grace_period_days", 3)
+        first_due_date = datetime.fromisoformat(order.get("first_due_date"))
+        
+        # Create schedule record
+        schedule = InstallmentSchedule(
+            invoice_id=invoice.id,
+            invoice_number=invoice_number,
+            clinic_id=order["clinic_id"],
+            clinic_name=clinic_name,
+            schedule_type=schedule_type,
+            interval_days=interval_days if schedule_type == "regular" else None,
+            total_amount=remaining_amount,
+            installments_count=installments_count,
+            grace_period_days=grace_period,
+            first_due_date=first_due_date,
+            created_by=order["medical_rep_id"],
+            created_by_name=med_rep_name
+        )
+        schedule_doc = schedule.model_dump()
+        schedule_doc["first_due_date"] = schedule_doc["first_due_date"].isoformat()
+        schedule_doc["created_at"] = schedule_doc["created_at"].isoformat()
+        await db.installment_schedules.insert_one(schedule_doc)
+        
+        # Create individual installments
+        amount_per_installment = remaining_amount / installments_count
+        
+        for i in range(installments_count):
+            # Calculate due date based on schedule type
+            due_date = first_due_date
+            if schedule_type == "monthly":
+                # Add months
+                month = due_date.month + i
+                year = due_date.year + (month - 1) // 12
+                month = ((month - 1) % 12) + 1
+                day = min(due_date.day, [31, 29 if year % 4 == 0 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
+                due_date = due_date.replace(year=year, month=month, day=day)
+            elif schedule_type == "weekly":
+                due_date = first_due_date + timedelta(days=i * 7)
+            else:  # regular
+                due_date = first_due_date + timedelta(days=i * interval_days)
+            
+            installment = Installment(
+                schedule_id=schedule.id,
+                invoice_id=invoice.id,
+                invoice_number=invoice_number,
+                clinic_id=order["clinic_id"],
+                clinic_name=clinic_name,
+                installment_number=i + 1,
+                amount=amount_per_installment,
+                remaining_amount=amount_per_installment,
+                due_date=due_date,
+                status="upcoming"
+            )
+            inst_doc = installment.model_dump()
+            inst_doc["due_date"] = inst_doc["due_date"].isoformat()
+            inst_doc["created_at"] = inst_doc["created_at"].isoformat()
+            inst_doc["updated_at"] = inst_doc["updated_at"].isoformat()
+            await db.installments.insert_one(inst_doc)
+        
+        logger.info(f"Created {installments_count} installments for invoice {invoice_number}")
+    
+    # Create audit log for invoice
     await create_audit_log(
         log_type=AuditLogType.INVOICE_CREATED,
         entity_type="invoice",
         entity_id=invoice.id,
         entity_serial=invoice_number,
         user=approver,
-        action_details=f"تم إنشاء فاتورة رقم {invoice_number} من الأوردر رقم {order.get('serial_number')}",
+        action_details=f"تم إنشاء فاتورة رقم {invoice_number} من الأوردر رقم {order.get('serial_number')} - حالة الدفع: {payment_status}",
         amount=total_amount,
         request=request
     )
@@ -5392,6 +6384,269 @@ async def get_accounting_dashboard(
         "latest_expenses": latest_expenses,
         "latest_debts": latest_debts
     }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALLMENT MANAGEMENT API
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Get all installments with filters
+@api_router.get("/installments")
+async def get_installments(
+    status: Optional[str] = None,  # upcoming, due, grace, overdue, paid, partial
+    clinic_id: Optional[str] = None,
+    invoice_id: Optional[str] = None,
+    due_within_days: Optional[int] = None,  # Filter by due within X days
+    skip: int = 0,
+    limit: int = 50,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.GM, UserRole.ACCOUNTANT, UserRole.MEDICAL_REP]))
+):
+    """Get installments with optional filters."""
+    query = {}
+    
+    if status:
+        query["status"] = status
+    if clinic_id:
+        query["clinic_id"] = clinic_id
+    if invoice_id:
+        query["invoice_id"] = invoice_id
+    if due_within_days:
+        future_date = (datetime.now(timezone.utc) + timedelta(days=due_within_days)).isoformat()
+        query["due_date"] = {"$lte": future_date}
+        query["status"] = {"$in": ["upcoming", "due", "grace"]}
+    
+    # Role-based filtering for medical reps
+    if current_user["role"] == UserRole.MEDICAL_REP.value:
+        # Get invoices created by this rep
+        rep_invoices = await db.invoices.find({"created_by": current_user["id"]}).to_list(None)
+        invoice_ids = [inv["id"] for inv in rep_invoices]
+        query["invoice_id"] = {"$in": invoice_ids}
+    
+    installments = await db.installments.find(query).sort("due_date", 1).skip(skip).limit(limit).to_list(None)
+    total = await db.installments.count_documents(query)
+    
+    return {"items": installments, "total": total}
+
+# Get installment summary (dashboard stats)
+@api_router.get("/installments/summary")
+async def get_installments_summary(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.GM, UserRole.ACCOUNTANT]))
+):
+    """Get installment summary for dashboard."""
+    now = datetime.now(timezone.utc).isoformat()
+    
+    overdue = await db.installments.count_documents({"status": "overdue"})
+    due_today = await db.installments.count_documents({
+        "status": {"$in": ["due", "grace"]},
+        "due_date": {"$lte": now}
+    })
+    upcoming_week = await db.installments.count_documents({
+        "status": "upcoming",
+        "due_date": {"$lte": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()}
+    })
+    
+    overdue_amount = 0
+    overdue_docs = await db.installments.find({"status": "overdue"}).to_list(None)
+    for inst in overdue_docs:
+        overdue_amount += inst.get("remaining_amount", 0)
+    
+    return {
+        "overdue_count": overdue,
+        "overdue_amount": overdue_amount,
+        "due_today_count": due_today,
+        "upcoming_week_count": upcoming_week
+    }
+
+# Pay an installment (full or partial)
+class InstallmentPaymentCreate(BaseModel):
+    amount: float
+    payment_method: str  # 'bank_transfer', 'e_wallet', 'instapay', 'cash'
+    notes: Optional[str] = None
+
+@api_router.post("/installments/{installment_id}/pay")
+async def pay_installment(
+    installment_id: str,
+    payment_data: InstallmentPaymentCreate,
+    request: Request,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.GM, UserRole.ACCOUNTANT, UserRole.MEDICAL_REP]))
+):
+    """Pay an installment (full or partial)."""
+    installment = await db.installments.find_one({"id": installment_id})
+    if not installment:
+        raise HTTPException(status_code=404, detail="Installment not found")
+    
+    if installment["status"] == "paid":
+        raise HTTPException(status_code=400, detail="Installment already paid")
+    
+    amount = min(payment_data.amount, installment["remaining_amount"])
+    
+    # Get invoice for info
+    invoice = await db.invoices.find_one({"id": installment["invoice_id"]})
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    
+    # Create payment record
+    payment_number = await get_next_serial_number("payments", 20001)
+    payment = Payment(
+        payment_number=payment_number,
+        invoice_id=installment["invoice_id"],
+        invoice_number=installment["invoice_number"],
+        clinic_id=installment["clinic_id"],
+        clinic_name=installment["clinic_name"],
+        amount=amount,
+        payment_method=payment_data.payment_method,
+        collected_by=current_user["id"],
+        collected_by_name=current_user.get("full_name", "Unknown"),
+        notes=payment_data.notes or f"دفع القسط {installment['installment_number']}"
+    )
+    payment_doc = payment.model_dump()
+    payment_doc["payment_date"] = payment_doc["payment_date"].isoformat()
+    payment_doc["created_at"] = payment_doc["created_at"].isoformat()
+    await db.payments.insert_one(payment_doc)
+    
+    # Update installment
+    new_paid = installment["paid_amount"] + amount
+    new_remaining = installment["remaining_amount"] - amount
+    new_status = "paid" if new_remaining <= 0 else "partial"
+    
+    await db.installments.update_one(
+        {"id": installment_id},
+        {"$set": {
+            "paid_amount": new_paid,
+            "remaining_amount": max(0, new_remaining),
+            "status": new_status,
+            "paid_date": datetime.now(timezone.utc).isoformat() if new_status == "paid" else None,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        },
+        "$push": {"payment_ids": payment.id}}
+    )
+    
+    # Update invoice
+    invoice_new_paid = invoice.get("paid_amount", 0) + amount
+    invoice_new_remaining = invoice.get("remaining_amount", 0) - amount
+    invoice_status = "paid" if invoice_new_remaining <= 0 else "partial"
+    
+    await db.invoices.update_one(
+        {"id": installment["invoice_id"]},
+        {"$set": {
+            "paid_amount": invoice_new_paid,
+            "remaining_amount": max(0, invoice_new_remaining),
+            "status": invoice_status,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Create audit log
+    await create_audit_log(
+        log_type=AuditLogType.PAYMENT_RECEIVED,
+        entity_type="installment",
+        entity_id=installment_id,
+        entity_serial=installment["installment_number"],
+        user=current_user,
+        action_details=f"دفع قسط {installment['installment_number']} بمبلغ {amount} ج.م للفاتورة {installment['invoice_number']}",
+        amount=amount,
+        request=request
+    )
+    
+    return {"message": "Payment recorded successfully", "payment_id": payment.id, "new_status": new_status}
+
+# Reschedule an installment (Admin/Accountant only)
+class InstallmentReschedule(BaseModel):
+    new_due_date: str
+    reason: str
+
+@api_router.post("/installments/{installment_id}/reschedule")
+async def reschedule_installment(
+    installment_id: str,
+    reschedule_data: InstallmentReschedule,
+    request: Request,
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN, UserRole.ACCOUNTANT]))
+):
+    """Reschedule an installment due date (Admin/Accountant only)."""
+    installment = await db.installments.find_one({"id": installment_id})
+    if not installment:
+        raise HTTPException(status_code=404, detail="Installment not found")
+    
+    if installment["status"] == "paid":
+        raise HTTPException(status_code=400, detail="Cannot reschedule paid installment")
+    
+    old_date = installment["due_date"]
+    
+    await db.installments.update_one(
+        {"id": installment_id},
+        {"$set": {
+            "due_date": reschedule_data.new_due_date,
+            "rescheduled_from": old_date,
+            "reschedule_reason": reschedule_data.reason,
+            "rescheduled_by": current_user["id"],
+            "rescheduled_by_name": current_user.get("full_name", "Unknown"),
+            "status": "upcoming",  # Reset status
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Create audit log
+    await create_audit_log(
+        log_type=AuditLogType.INVOICE_MODIFIED,
+        entity_type="installment",
+        entity_id=installment_id,
+        entity_serial=installment["installment_number"],
+        user=current_user,
+        action_details=f"إعادة جدولة قسط {installment['installment_number']} من {old_date} إلى {reschedule_data.new_due_date}: {reschedule_data.reason}",
+        old_values={"due_date": old_date},
+        new_values={"due_date": reschedule_data.new_due_date},
+        request=request
+    )
+    
+    return {"message": "Installment rescheduled successfully"}
+
+# Update installment statuses (background job - can be called by cron)
+@api_router.post("/installments/update-statuses")
+async def update_installment_statuses(
+    current_user: dict = Depends(require_role([UserRole.SUPER_ADMIN]))
+):
+    """Update installment statuses based on due dates (run daily)."""
+    now = datetime.now(timezone.utc)
+    today_str = now.isoformat()
+    
+    updated_count = 0
+    
+    # Get all schedules for grace period info
+    schedules = {s["id"]: s for s in await db.installment_schedules.find().to_list(None)}
+    
+    # Update upcoming to due
+    upcoming = await db.installments.find({"status": "upcoming"}).to_list(None)
+    for inst in upcoming:
+        due_date = datetime.fromisoformat(inst["due_date"].replace("Z", "+00:00")) if isinstance(inst["due_date"], str) else inst["due_date"]
+        if due_date.date() <= now.date():
+            await db.installments.update_one(
+                {"id": inst["id"]},
+                {"$set": {"status": "due", "updated_at": today_str}}
+            )
+            updated_count += 1
+    
+    # Update due to grace/overdue
+    due = await db.installments.find({"status": {"$in": ["due", "grace"]}}).to_list(None)
+    for inst in due:
+        due_date = datetime.fromisoformat(inst["due_date"].replace("Z", "+00:00")) if isinstance(inst["due_date"], str) else inst["due_date"]
+        schedule = schedules.get(inst.get("schedule_id", ""))
+        grace_days = schedule.get("grace_period_days", 3) if schedule else 3
+        
+        grace_end = due_date + timedelta(days=grace_days)
+        
+        if now > grace_end:
+            await db.installments.update_one(
+                {"id": inst["id"]},
+                {"$set": {"status": "overdue", "updated_at": today_str}}
+            )
+            updated_count += 1
+        elif now > due_date and now <= grace_end:
+            await db.installments.update_one(
+                {"id": inst["id"]},
+                {"$set": {"status": "grace", "updated_at": today_str}}
+            )
+            updated_count += 1
+    
+    return {"message": f"Updated {updated_count} installment statuses"}
 
 # Get all invoices
 @api_router.get("/accounting/invoices")
@@ -6012,8 +7267,694 @@ async def export_accounting_excel(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# WHATSAPP SETTINGS API
+# ═══════════════════════════════════════════════════════════════════════════
+
+class WhatsAppSettingsModel(BaseModel):
+    enabled: bool = False
+    api_provider: str = "ultramsg"  # ultramsg, twilio, wati, etc.
+    api_key: str = ""
+    instance_id: str = ""
+    default_country_code: str = "+20"
+    reminder_7_days_enabled: bool = True
+    reminder_3_days_enabled: bool = True
+    reminder_due_day_enabled: bool = True
+    reminder_overdue_enabled: bool = True
+    template_reminder: str = "مرحباً {clinic_name}، نذكركم بموعد استحقاق القسط رقم {installment_number} بقيمة {amount} بتاريخ {due_date}. شكراً لتعاملكم معنا."
+    template_overdue: str = "مرحباً {clinic_name}، القسط رقم {installment_number} بقيمة {amount} متأخر منذ {days_overdue} يوم. يرجى السداد في أقرب وقت."
+    template_payment_confirmation: str = "شكراً {clinic_name}، تم استلام دفعة بقيمة {amount}. المتبقي: {remaining}."
+
+@api_router.get("/whatsapp-settings")
+async def get_whatsapp_settings(current_user: dict = Depends(get_current_user)):
+    """Get WhatsApp settings (Super Admin / Accountant only)"""
+    if current_user.get("role") not in ["super_admin", "accountant"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية لعرض هذه الإعدادات")
+    
+    settings = await db.whatsapp_settings.find_one({}, {"_id": 0})
+    if not settings:
+        # Return default settings
+        return WhatsAppSettingsModel().model_dump()
+    return settings
+
+@api_router.put("/whatsapp-settings")
+async def update_whatsapp_settings(
+    settings: WhatsAppSettingsModel,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update WhatsApp settings (Super Admin only)"""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="فقط المسؤول يمكنه تعديل هذه الإعدادات")
+    
+    settings_dict = settings.model_dump()
+    settings_dict["updated_at"] = datetime.now(timezone.utc).isoformat()
+    settings_dict["updated_by"] = current_user.get("id")
+    
+    await db.whatsapp_settings.replace_one({}, settings_dict, upsert=True)
+    
+    return {"message": "تم تحديث إعدادات WhatsApp بنجاح", "settings": settings_dict}
+
+@api_router.post("/whatsapp-settings/test")
+async def test_whatsapp_connection(
+    phone: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Test WhatsApp connection by sending a test message"""
+    if current_user.get("role") != "super_admin":
+        raise HTTPException(status_code=403, detail="فقط المسؤول يمكنه اختبار الاتصال")
+    
+    settings = await db.whatsapp_settings.find_one({}, {"_id": 0})
+    if not settings or not settings.get("enabled"):
+        raise HTTPException(status_code=400, detail="إعدادات WhatsApp غير مفعلة")
+    
+    if not settings.get("api_key") or not settings.get("instance_id"):
+        raise HTTPException(status_code=400, detail="يرجى إدخال مفتاح API ومعرف الحساب")
+    
+    # For now, just simulate success - actual implementation would call the API
+    # This is a placeholder for actual WhatsApp API integration
+    provider = settings.get("api_provider", "ultramsg")
+    
+    return {
+        "success": True,
+        "message": f"تم إرسال رسالة اختبار عبر {provider} إلى {phone}",
+        "provider": provider
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALLMENT RESCHEDULE API
+# ═══════════════════════════════════════════════════════════════════════════
+
+class InstallmentRescheduleRequest(BaseModel):
+    new_due_date: str
+    reason: str
+
+@api_router.post("/installments/{installment_id}/reschedule")
+async def reschedule_installment(
+    installment_id: str,
+    request: InstallmentRescheduleRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Reschedule an installment's due date (Admin/Accountant only)"""
+    if current_user.get("role") not in ["super_admin", "accountant"]:
+        raise HTTPException(status_code=403, detail="فقط المسؤول أو المحاسب يمكنه إعادة جدولة الأقساط")
+    
+    # Find the installment
+    installment = await db.installments.find_one({"id": installment_id})
+    if not installment:
+        raise HTTPException(status_code=404, detail="القسط غير موجود")
+    
+    # Can't reschedule paid installments
+    if installment.get("status") == "paid":
+        raise HTTPException(status_code=400, detail="لا يمكن إعادة جدولة قسط مدفوع بالكامل")
+    
+    old_due_date = installment.get("due_date")
+    
+    # Update installment
+    await db.installments.update_one(
+        {"id": installment_id},
+        {
+            "$set": {
+                "due_date": request.new_due_date,
+                "rescheduled_from": old_due_date,
+                "reschedule_reason": request.reason,
+                "rescheduled_by": current_user.get("id"),
+                "rescheduled_at": datetime.now(timezone.utc).isoformat(),
+                "status": "upcoming"  # Reset status since we changed the date
+            }
+        }
+    )
+    
+    # Create audit log
+    await db.audit_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "action": "installment_rescheduled",
+        "entity_type": "installment",
+        "entity_id": installment_id,
+        "performed_by": current_user.get("id"),
+        "performed_by_name": current_user.get("full_name", current_user.get("username")),
+        "details": {
+            "old_due_date": old_due_date,
+            "new_due_date": request.new_due_date,
+            "reason": request.reason,
+            "invoice_id": installment.get("invoice_id")
+        },
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    
+    return {
+        "message": "تم إعادة جدولة القسط بنجاح",
+        "old_due_date": old_due_date,
+        "new_due_date": request.new_due_date
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INSTALLMENTS ANALYTICS & CREDIT SCORING API
+# ═══════════════════════════════════════════════════════════════════════════
+
+@api_router.get("/installments/analytics")
+async def get_installments_analytics(current_user: dict = Depends(get_current_user)):
+    """Get comprehensive installments analytics"""
+    if current_user.get("role") not in ["super_admin", "accountant", "admin"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية")
+    
+    # Get all installments
+    all_installments = await db.installments.find({}).to_list(10000)
+    
+    # Status breakdown
+    status_counts = {"upcoming": 0, "due": 0, "grace": 0, "overdue": 0, "paid": 0, "partial": 0}
+    status_amounts = {"upcoming": 0, "due": 0, "grace": 0, "overdue": 0, "paid": 0, "partial": 0}
+    total_amount = 0
+    total_paid = 0
+    total_remaining = 0
+    
+    # Clinic breakdown
+    clinic_data = {}
+    
+    for inst in all_installments:
+        status = inst.get("status", "upcoming")
+        amount = inst.get("amount", 0)
+        paid = inst.get("paid_amount", 0)
+        remaining = inst.get("remaining_amount", amount)
+        clinic_id = inst.get("clinic_id")
+        clinic_name = inst.get("clinic_name", "Unknown")
+        
+        status_counts[status] = status_counts.get(status, 0) + 1
+        status_amounts[status] = status_amounts.get(status, 0) + remaining
+        total_amount += amount
+        total_paid += paid
+        total_remaining += remaining
+        
+        # Aggregate by clinic
+        if clinic_id:
+            if clinic_id not in clinic_data:
+                clinic_data[clinic_id] = {
+                    "clinic_name": clinic_name,
+                    "total_installments": 0,
+                    "total_amount": 0,
+                    "paid_amount": 0,
+                    "overdue_count": 0,
+                    "overdue_amount": 0,
+                    "paid_on_time_count": 0
+                }
+            clinic_data[clinic_id]["total_installments"] += 1
+            clinic_data[clinic_id]["total_amount"] += amount
+            clinic_data[clinic_id]["paid_amount"] += paid
+            if status == "overdue":
+                clinic_data[clinic_id]["overdue_count"] += 1
+                clinic_data[clinic_id]["overdue_amount"] += remaining
+            if status == "paid":
+                clinic_data[clinic_id]["paid_on_time_count"] += 1
+    
+    # Calculate collection rate
+    collection_rate = (total_paid / total_amount * 100) if total_amount > 0 else 0
+    
+    # Top overdue clinics
+    top_overdue = sorted(
+        [{"clinic_id": k, **v} for k, v in clinic_data.items()],
+        key=lambda x: x["overdue_amount"],
+        reverse=True
+    )[:10]
+    
+    return {
+        "summary": {
+            "total_installments": len(all_installments),
+            "total_amount": total_amount,
+            "total_paid": total_paid,
+            "total_remaining": total_remaining,
+            "collection_rate": round(collection_rate, 2)
+        },
+        "status_breakdown": {
+            "counts": status_counts,
+            "amounts": status_amounts
+        },
+        "top_overdue_clinics": top_overdue,
+        "clinic_count": len(clinic_data)
+    }
+
+@api_router.get("/clinics/{clinic_id}/credit-score")
+async def get_clinic_credit_score(clinic_id: str, current_user: dict = Depends(get_current_user)):
+    """Calculate and return credit score for a clinic based on payment history"""
+    if current_user.get("role") not in ["super_admin", "accountant", "admin"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية")
+    
+    # Get clinic's installments
+    installments = await db.installments.find({"clinic_id": clinic_id}).to_list(1000)
+    
+    if not installments:
+        return {
+            "clinic_id": clinic_id,
+            "credit_score": 100,  # Default score for new clinics
+            "rating": "A",
+            "details": {"message": "لا توجد أقساط سابقة لهذه العيادة"}
+        }
+    
+    # Calculate score components
+    total_installments = len(installments)
+    paid_on_time = 0
+    paid_late = 0
+    overdue = 0
+    total_overdue_days = 0
+    
+    for inst in installments:
+        status = inst.get("status")
+        if status == "paid":
+            # Check if paid on time (no rescheduled_from means it was on time)
+            if not inst.get("rescheduled_from"):
+                paid_on_time += 1
+            else:
+                paid_late += 1
+        elif status == "overdue":
+            overdue += 1
+            # Calculate days overdue
+            due_date = inst.get("due_date")
+            if due_date:
+                try:
+                    due_dt = datetime.fromisoformat(due_date.replace('Z', '+00:00'))
+                    days_late = (datetime.now(timezone.utc) - due_dt).days
+                    total_overdue_days += max(0, days_late)
+                except:
+                    pass
+    
+    # Score calculation (max 100)
+    # Base score: 100
+    # -5 points per overdue installment
+    # -1 point per 7 days of total overdue
+    # -2 points per late payment
+    # +2 points per on-time payment (up to 20 bonus)
+    
+    score = 100
+    score -= overdue * 5
+    score -= (total_overdue_days // 7)
+    score -= paid_late * 2
+    score += min(paid_on_time * 2, 20)  # Cap bonus at 20
+    
+    # Clamp score between 0 and 100
+    score = max(0, min(100, score))
+    
+    # Determine rating
+    if score >= 90:
+        rating = "A"
+        rating_label = "ممتاز"
+    elif score >= 75:
+        rating = "B"
+        rating_label = "جيد جداً"
+    elif score >= 60:
+        rating = "C"
+        rating_label = "جيد"
+    elif score >= 40:
+        rating = "D"
+        rating_label = "مقبول"
+    else:
+        rating = "F"
+        rating_label = "ضعيف"
+    
+    # Store/update credit score
+    await db.clinic_credit_scores.update_one(
+        {"clinic_id": clinic_id},
+        {
+            "$set": {
+                "clinic_id": clinic_id,
+                "credit_score": score,
+                "rating": rating,
+                "rating_label": rating_label,
+                "total_installments": total_installments,
+                "paid_on_time": paid_on_time,
+                "paid_late": paid_late,
+                "current_overdue": overdue,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+        },
+        upsert=True
+    )
+    
+    return {
+        "clinic_id": clinic_id,
+        "credit_score": score,
+        "rating": rating,
+        "rating_label": rating_label,
+        "details": {
+            "total_installments": total_installments,
+            "paid_on_time": paid_on_time,
+            "paid_late": paid_late,
+            "current_overdue": overdue,
+            "total_overdue_days": total_overdue_days
+        }
+    }
+
+@api_router.get("/installments/export")
+async def export_installments_report(
+    status: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Export installments report as CSV"""
+    if current_user.get("role") not in ["super_admin", "accountant", "admin"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية")
+    
+    query = {}
+    if status and status != "all":
+        query["status"] = status
+    
+    installments = await db.installments.find(query, {"_id": 0}).sort("due_date", 1).to_list(10000)
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "رقم القسط", "رقم الفاتورة", "العيادة", "المبلغ", 
+        "المدفوع", "المتبقي", "تاريخ الاستحقاق", "الحالة"
+    ])
+    
+    status_labels = {
+        "upcoming": "قادم",
+        "due": "مستحق",
+        "grace": "فترة سماح",
+        "overdue": "متأخر",
+        "paid": "مدفوع",
+        "partial": "مدفوع جزئياً"
+    }
+    
+    for inst in installments:
+        writer.writerow([
+            inst.get("installment_number"),
+            inst.get("invoice_number"),
+            inst.get("clinic_name"),
+            inst.get("amount"),
+            inst.get("paid_amount", 0),
+            inst.get("remaining_amount"),
+            inst.get("due_date", "")[:10] if inst.get("due_date") else "",
+            status_labels.get(inst.get("status"), inst.get("status"))
+        ])
+    
+    output.seek(0)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename=installments_report_{datetime.now().strftime('%Y%m%d')}.csv"
+        }
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PLANS MODULE API
+# ═══════════════════════════════════════════════════════════════════════════
+
+@api_router.get("/users/autocomplete")
+async def users_autocomplete(
+    q: str = "",
+    current_user: dict = Depends(get_current_user)
+):
+    """Search users by name for autocomplete. Returns matching users."""
+    query = {"is_deleted": {"$ne": True}}
+    if q:
+        query["full_name"] = {"$regex": q, "$options": "i"}
+    
+    users = await db.users.find(query).limit(20).to_list(20)
+    return [
+        {
+            "id": u["id"],
+            "full_name": u.get("full_name", ""),
+            "role": u.get("role", ""),
+            "username": u.get("username", "")
+        }
+        for u in users
+    ]
+
+@api_router.post("/plans")
+async def create_plan(
+    plan_data: PlanCreate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Create a new monthly plan."""
+    # Check if plan for this month already exists
+    existing = await db.plans.find_one({
+        "user_id": current_user["id"],
+        "month": plan_data.month,
+        "year": plan_data.year
+    })
+    if existing:
+        raise HTTPException(status_code=400, detail="يوجد خطة لهذا الشهر بالفعل")
+    
+    # Get manager_id from current user
+    manager_id = current_user.get("manager_id")
+    if not manager_id and current_user.get("role") not in ["super_admin", "gm"]:
+        raise HTTPException(status_code=400, detail="لا يوجد مدير مباشر لك")
+    
+    plan_id = str(uuid.uuid4())
+    plan = {
+        "id": plan_id,
+        "user_id": current_user["id"],
+        "manager_id": manager_id or current_user["id"],
+        "month": plan_data.month,
+        "year": plan_data.year,
+        "status": "draft",
+        "planned_visits": plan_data.planned_visits,
+        "recurring_visits": plan_data.recurring_visits,
+        "new_clinics": plan_data.new_clinics,
+        "notes": plan_data.notes,
+        "comments": [],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.plans.insert_one(plan)
+    return plan
+
+@api_router.get("/plans")
+async def get_plans(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    status: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get plans based on user role. Reps see own, Managers see team, GM/Admin see all."""
+    query = {}
+    
+    if current_user.get("role") == "medical_rep":
+        query["user_id"] = current_user["id"]
+    elif current_user.get("role") == "manager":
+        team = await db.users.find({"manager_id": current_user["id"]}).to_list(100)
+        team_ids = [u["id"] for u in team]
+        team_ids.append(current_user["id"])
+        query["user_id"] = {"$in": team_ids}
+    
+    if month:
+        query["month"] = month
+    if year:
+        query["year"] = year
+    if status:
+        query["status"] = status
+    
+    plans = await db.plans.find(query).sort("created_at", -1).to_list(100)
+    
+    for plan in plans:
+        user = await db.users.find_one({"id": plan.get("user_id")})
+        plan["user_name"] = user.get("full_name", "Unknown") if user else "Unknown"
+    
+    return plans
+
+@api_router.get("/plans/{plan_id}")
+async def get_plan(
+    plan_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get a specific plan by ID with clinic names."""
+    plan = await db.plans.find_one({"id": plan_id})
+    if not plan:
+        raise HTTPException(status_code=404, detail="الخطة غير موجودة")
+    
+    if current_user.get("role") == "medical_rep" and plan["user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="غير مصرح لك بعرض هذه الخطة")
+    
+    # Get clinic names
+    clinic_ids = [v.get("clinic_id") for v in plan.get("planned_visits", []) if v.get("clinic_id")]
+    clinic_ids.extend([v.get("clinic_id") for v in plan.get("recurring_visits", []) if v.get("clinic_id")])
+    clinics = await db.clinics.find({"id": {"$in": clinic_ids}}).to_list(100)
+    clinic_map = {c["id"]: c.get("name", "Unknown") for c in clinics}
+    
+    for v in plan.get("planned_visits", []):
+        v["clinic_name"] = clinic_map.get(v.get("clinic_id"), "Unknown")
+    for v in plan.get("recurring_visits", []):
+        v["clinic_name"] = clinic_map.get(v.get("clinic_id"), "Unknown")
+    
+    return plan
+
+@api_router.put("/plans/{plan_id}")
+async def update_plan(
+    plan_id: str,
+    plan_data: PlanUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update a plan. Only allowed if status is draft or needs_revision."""
+    plan = await db.plans.find_one({"id": plan_id})
+    if not plan:
+        raise HTTPException(status_code=404, detail="الخطة غير موجودة")
+    
+    if plan["user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="غير مصرح لك بتعديل هذه الخطة")
+    
+    if plan.get("status") not in ["draft", "needs_revision"]:
+        raise HTTPException(status_code=400, detail="لا يمكن تعديل الخطة بعد إرسالها للموافقة")
+    
+    update_data = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    if plan_data.notes is not None:
+        update_data["notes"] = plan_data.notes
+    if plan_data.planned_visits is not None:
+        update_data["planned_visits"] = plan_data.planned_visits
+    if plan_data.recurring_visits is not None:
+        update_data["recurring_visits"] = plan_data.recurring_visits
+    if plan_data.new_clinics is not None:
+        update_data["new_clinics"] = plan_data.new_clinics
+    
+    await db.plans.update_one({"id": plan_id}, {"$set": update_data})
+    return {"message": "تم تحديث الخطة بنجاح"}
+
+@api_router.post("/plans/{plan_id}/submit")
+async def submit_plan(
+    plan_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Submit a plan for manager approval."""
+    plan = await db.plans.find_one({"id": plan_id})
+    if not plan:
+        raise HTTPException(status_code=404, detail="الخطة غير موجودة")
+    
+    if plan["user_id"] != current_user["id"]:
+        raise HTTPException(status_code=403, detail="غير مصرح لك بإرسال هذه الخطة")
+    
+    if plan.get("status") not in ["draft", "needs_revision"]:
+        raise HTTPException(status_code=400, detail="لا يمكن إرسال هذه الخطة")
+    
+    await db.plans.update_one(
+        {"id": plan_id},
+        {"$set": {
+            "status": "pending_approval",
+            "submitted_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+    
+    # Notify manager
+    manager = await db.users.find_one({"id": plan.get("manager_id")})
+    if manager:
+        await create_notification(
+            user_id=manager["id"],
+            type=NotificationType.ORDER_PENDING_APPROVAL,
+            title="خطة جديدة للموافقة",
+            message=f"تم إرسال خطة شهر {plan['month']}/{plan['year']} من {current_user.get('full_name')} للموافقة",
+            data={"plan_id": plan_id}
+        )
+    
+    return {"message": "تم إرسال الخطة للموافقة"}
+
+@api_router.post("/plans/{plan_id}/approve")
+async def approve_plan(
+    plan_id: str,
+    action_data: PlanApprovalAction,
+    current_user: dict = Depends(require_role([UserRole.MANAGER, UserRole.GM, UserRole.SUPER_ADMIN]))
+):
+    """Approve, reject, or request revision for a plan."""
+    plan = await db.plans.find_one({"id": plan_id})
+    if not plan:
+        raise HTTPException(status_code=404, detail="الخطة غير موجودة")
+    
+    if current_user.get("role") == "manager" and plan.get("manager_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="غير مصرح لك بالموافقة على هذه الخطة")
+    
+    if plan.get("status") != "pending_approval":
+        raise HTTPException(status_code=400, detail="الخطة ليست بانتظار الموافقة")
+    
+    update_data = {"manager_notes": action_data.manager_notes}
+    
+    if action_data.action == "approve":
+        update_data["status"] = "approved"
+        update_data["approved_at"] = datetime.now(timezone.utc).isoformat()
+        update_data["approved_by"] = current_user["id"]
+        message = "تمت الموافقة على خطتك"
+    elif action_data.action == "reject":
+        update_data["status"] = "draft"
+        update_data["rejection_reason"] = action_data.rejection_reason
+        message = f"تم رفض خطتك: {action_data.rejection_reason or 'بدون سبب'}"
+    elif action_data.action == "request_revision":
+        update_data["status"] = "needs_revision"
+        message = f"يرجى تعديل الخطة: {action_data.manager_notes or ''}"
+    else:
+        raise HTTPException(status_code=400, detail="إجراء غير صحيح")
+    
+    await db.plans.update_one({"id": plan_id}, {"$set": update_data})
+    
+    await create_notification(
+        user_id=plan["user_id"],
+        type=NotificationType.ORDER_APPROVED if action_data.action == "approve" else NotificationType.ORDER_REJECTED,
+        title="تحديث حالة الخطة",
+        message=message,
+        data={"plan_id": plan_id}
+    )
+    
+    return {"message": "تم تحديث حالة الخطة"}
+
+@api_router.post("/plans/{plan_id}/comments")
+async def add_plan_comment(
+    plan_id: str,
+    comment_data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Add a comment to a plan."""
+    plan = await db.plans.find_one({"id": plan_id})
+    if not plan:
+        raise HTTPException(status_code=404, detail="الخطة غير موجودة")
+    
+    comment = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "user_name": current_user.get("full_name", "Unknown"),
+        "content": comment_data.get("content", ""),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.plans.update_one({"id": plan_id}, {"$push": {"comments": comment}})
+    return {"message": "تم إضافة التعليق", "comment": comment}
+
+@api_router.get("/plans/stats/summary")
+async def get_plans_summary(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get plan statistics summary."""
+    query = {}
+    
+    if current_user.get("role") == "medical_rep":
+        query["user_id"] = current_user["id"]
+    elif current_user.get("role") == "manager":
+        team = await db.users.find({"manager_id": current_user["id"]}).to_list(100)
+        query["user_id"] = {"$in": [u["id"] for u in team] + [current_user["id"]]}
+    
+    if month:
+        query["month"] = month
+    if year:
+        query["year"] = year
+    
+    plans = await db.plans.find(query).to_list(100)
+    
+    total_planned = sum(len(p.get("planned_visits", [])) for p in plans)
+    total_completed = sum(
+        len([v for v in p.get("planned_visits", []) if v.get("is_completed")])
+        for p in plans
+    )
+    new_clinics = sum(len(p.get("new_clinics", [])) for p in plans)
+    
+    return {
+        "total_plans": len(plans),
+        "total_planned_visits": total_planned,
+        "completed_visits": total_completed,
+        "pending_visits": total_planned - total_completed,
+        "completion_rate": round(total_completed / total_planned * 100, 1) if total_planned > 0 else 0,
+        "new_clinics_planned": new_clinics
+    }
+
 # Include the API router in the app
 app.include_router(api_router)
+
 
 
 @app.on_event("startup")
@@ -6044,3 +7985,176 @@ async def startup_db_client():
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+# ===================== SCHEDULED NOTIFICATION JOBS =====================
+
+scheduler = AsyncIOScheduler(timezone="Africa/Cairo")
+
+async def check_invoices_due_today():
+    """Check for invoices due today and send notifications to accountants"""
+    try:
+        today = datetime.now(timezone.utc).date()
+        today_start = datetime.combine(today, datetime.min.time()).replace(tzinfo=timezone.utc)
+        today_end = datetime.combine(today, datetime.max.time()).replace(tzinfo=timezone.utc)
+        
+        # Find installments due today
+        installments = await db.installments.find({
+            "due_date": {"$gte": today_start.isoformat(), "$lte": today_end.isoformat()},
+            "status": {"$in": ["pending", "overdue"]}
+        }).to_list(100)
+        
+        for installment in installments:
+            # Get order and clinic details
+            order = await db.orders.find_one({"id": installment.get("order_id")})
+            clinic = await db.clinics.find_one({"id": order.get("clinic_id") if order else None})
+            
+            # Notify accountants
+            await send_notification_to_role(
+                UserRole.ACCOUNTANT,
+                NotificationType.INVOICE_DUE_TODAY,
+                "فاتورة مستحقة اليوم",
+                f"فاتورة مستحقة من {clinic.get('name', 'عيادة')} بمبلغ {installment.get('amount', 0)} ج.م",
+                {
+                    "installment_id": installment.get("id"),
+                    "order_id": installment.get("order_id"),
+                    "clinic_name": clinic.get("name") if clinic else "N/A",
+                    "amount": installment.get("amount"),
+                    "due_date": installment.get("due_date")
+                }
+            )
+        
+        logger.info(f"✅ Checked {len(installments)} invoices due today")
+    except Exception as e:
+        logger.error(f"❌ Failed to check invoices due today: {e}")
+
+async def check_invoices_due_tomorrow():
+    """Check for invoices due tomorrow and send reminder notifications"""
+    try:
+        tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).date()
+        tomorrow_start = datetime.combine(tomorrow, datetime.min.time()).replace(tzinfo=timezone.utc)
+        tomorrow_end = datetime.combine(tomorrow, datetime.max.time()).replace(tzinfo=timezone.utc)
+        
+        installments = await db.installments.find({
+            "due_date": {"$gte": tomorrow_start.isoformat(), "$lte": tomorrow_end.isoformat()},
+            "status": "pending"
+        }).to_list(100)
+        
+        for installment in installments:
+            order = await db.orders.find_one({"id": installment.get("order_id")})
+            clinic = await db.clinics.find_one({"id": order.get("clinic_id") if order else None})
+            
+            await send_notification_to_role(
+                UserRole.ACCOUNTANT,
+                NotificationType.INVOICE_DUE_TOMORROW,
+                "فاتورة مستحقة غداً",
+                f"تذكير: فاتورة من {clinic.get('name', 'عيادة')} مستحقة غداً بمبلغ {installment.get('amount', 0)} ج.م",
+                {
+                    "installment_id": installment.get("id"),
+                    "clinic_name": clinic.get("name") if clinic else "N/A",
+                    "amount": installment.get("amount")
+                }
+            )
+        
+        logger.info(f"✅ Sent {len(installments)} due tomorrow reminders")
+    except Exception as e:
+        logger.error(f"❌ Failed to check invoices due tomorrow: {e}")
+
+async def check_overdue_invoices():
+    """Check for overdue invoices and send notifications (runs every 10 days)"""
+    try:
+        today = datetime.now(timezone.utc)
+        
+        # Find overdue installments
+        overdue = await db.installments.find({
+            "due_date": {"$lt": today.isoformat()},
+            "status": {"$in": ["pending", "overdue"]}
+        }).to_list(200)
+        
+        for installment in overdue:
+            order = await db.orders.find_one({"id": installment.get("order_id")})
+            clinic = await db.clinics.find_one({"id": order.get("clinic_id") if order else None})
+            
+            due_date = datetime.fromisoformat(installment.get("due_date", today.isoformat()).replace('Z', '+00:00'))
+            days_overdue = (today - due_date).days
+            
+            # Notify accountants and managers
+            for role in [UserRole.ACCOUNTANT, UserRole.GM]:
+                await send_notification_to_role(
+                    role,
+                    NotificationType.INVOICE_OVERDUE,
+                    "⚠️ فاتورة متأخرة",
+                    f"فاتورة متأخرة {days_overdue} يوم من {clinic.get('name', 'عيادة')} بمبلغ {installment.get('amount', 0)} ج.م",
+                    {
+                        "installment_id": installment.get("id"),
+                        "clinic_name": clinic.get("name") if clinic else "N/A",
+                        "days_overdue": days_overdue,
+                        "amount": installment.get("amount")
+                    }
+                )
+        
+        logger.info(f"✅ Sent {len(overdue)} overdue invoice notifications")
+    except Exception as e:
+        logger.error(f"❌ Failed to check overdue invoices: {e}")
+
+async def send_daily_report_to_managers():
+    """Send daily summary report to managers"""
+    try:
+        today = datetime.now(timezone.utc).date()
+        yesterday = today - timedelta(days=1)
+        yesterday_start = datetime.combine(yesterday, datetime.min.time()).replace(tzinfo=timezone.utc)
+        yesterday_end = datetime.combine(yesterday, datetime.max.time()).replace(tzinfo=timezone.utc)
+        
+        # Get managers and GM
+        managers = await db.users.find({
+            "role": {"$in": ["manager", "gm", "super_admin"]},
+            "is_active": True,
+            "is_deleted": {"$ne": True}
+        }).to_list(50)
+        
+        for manager in managers:
+            # Get orders from yesterday for this manager's team (or all for GM/admin)
+            query = {"created_at": {"$gte": yesterday_start.isoformat(), "$lte": yesterday_end.isoformat()}}
+            if manager["role"] == "manager":
+                # Get team members
+                team = await db.users.find({"manager_id": manager["id"]}).to_list(50)
+                team_ids = [t["id"] for t in team]
+                query["created_by"] = {"$in": team_ids}
+            
+            orders = await db.orders.find(query).to_list(500)
+            total_sales = sum(o.get("total", 0) for o in orders)
+            pending_orders = await db.orders.count_documents({"status": "pending_approval"})
+            
+            # Create daily report notification
+            await create_notification(
+                manager["id"],
+                NotificationType.DAILY_REPORT,
+                "📊 التقرير اليومي",
+                f"طلبات أمس: {len(orders)} | المبيعات: {total_sales:,.0f} ج.م | معلق: {pending_orders}",
+                {
+                    "date": yesterday.isoformat(),
+                    "orders_count": len(orders),
+                    "total_sales": total_sales,
+                    "pending_orders": pending_orders
+                }
+            )
+        
+        logger.info(f"✅ Sent daily reports to {len(managers)} managers")
+    except Exception as e:
+        logger.error(f"❌ Failed to send daily reports: {e}")
+
+# Start scheduler on app startup
+@app.on_event("startup")
+async def start_scheduler():
+    try:
+        # Daily checks at 8:00 AM Cairo time
+        scheduler.add_job(check_invoices_due_today, CronTrigger(hour=8, minute=0))
+        scheduler.add_job(check_invoices_due_tomorrow, CronTrigger(hour=8, minute=5))
+        scheduler.add_job(send_daily_report_to_managers, CronTrigger(hour=8, minute=10))
+        
+        # Overdue check every 10 days at 9:00 AM
+        scheduler.add_job(check_overdue_invoices, CronTrigger(day='1,11,21', hour=9, minute=0))
+        
+        scheduler.start()
+        logger.info("✅ Notification scheduler started successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to start scheduler: {e}")

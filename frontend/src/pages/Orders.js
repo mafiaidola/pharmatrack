@@ -69,8 +69,21 @@ const Orders = ({ user, onLogout }) => {
     discount_value: '',
     discount_reason: '',
     notes: '',
+    // Payment fields - only for regular orders
+    payment_status: 'unpaid',  // 'full', 'partial', 'unpaid'
+    payment_method: '',        // 'bank_transfer', 'e_wallet', 'instapay', 'cash'
+    amount_paid: '',
+    // Installment scheduling fields - for partial/unpaid
+    schedule_type: 'monthly',  // 'monthly', 'weekly', 'regular', 'custom'
+    installments_count: 3,
+    interval_days: 30,         // for 'regular' type
+    first_due_date: '',
+    grace_period_days: 3,
+    custom_installments: [],   // for 'custom' type: [{amount, due_date}]
+    receipt_url: '',            // Payment receipt image URL
   });
   const [loading, setLoading] = useState(false);
+  const [receiptUploading, setReceiptUploading] = useState(false);
 
   useEffect(() => {
     fetchOrders();
@@ -226,8 +239,54 @@ const Orders = ({ user, onLogout }) => {
       discount_value: '',
       discount_reason: '',
       notes: '',
+      payment_status: 'unpaid',
+      payment_method: '',
+      amount_paid: '',
+      schedule_type: 'monthly',
+      installments_count: 3,
+      interval_days: 30,
+      first_due_date: '',
+      grace_period_days: 3,
+      custom_installments: [],
+      receipt_url: '',
     });
     setEditingOrder(null);
+  };
+
+  // Handle receipt upload
+  const handleReceiptUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'application/pdf'];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error('نوع الملف غير مسموح. يُسمح بالصور و PDF فقط.');
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('حجم الملف كبير جداً. الحد الأقصى 10MB.');
+      return;
+    }
+
+    setReceiptUploading(true);
+    try {
+      const formDataUpload = new FormData();
+      formDataUpload.append('file', file);
+
+      const response = await api.post('/upload-receipt', formDataUpload, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      setFormData(prev => ({ ...prev, receipt_url: response.data.url }));
+      toast.success('تم رفع إيصال الدفع بنجاح');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'فشل في رفع الإيصال');
+    } finally {
+      setReceiptUploading(false);
+    }
   };
 
   const handleEdit = (order) => {
@@ -419,6 +478,29 @@ const Orders = ({ user, onLogout }) => {
       }
     }
 
+    // Validation for regular order payment
+    if (formData.order_type === 'regular') {
+      if ((formData.payment_status === 'full' || formData.payment_status === 'partial') && !formData.payment_method) {
+        toast.error('يجب اختيار طريقة الدفع');
+        setLoading(false);
+        return;
+      }
+      if (formData.payment_status === 'partial') {
+        const amountPaid = parseFloat(formData.amount_paid || 0);
+        const total = calculateTotal();
+        if (amountPaid <= 0) {
+          toast.error('يجب إدخال المبلغ المدفوع للدفع الجزئي');
+          setLoading(false);
+          return;
+        }
+        if (amountPaid >= total) {
+          toast.error('المبلغ المدفوع يجب أن يكون أقل من إجمالي الطلب');
+          setLoading(false);
+          return;
+        }
+      }
+    }
+
     // Silent high-accuracy GPS capture in background
     let latitude = null;
     let longitude = null;
@@ -448,6 +530,18 @@ const Orders = ({ user, onLogout }) => {
       notes: formData.notes,
       latitude,
       longitude,
+      // Payment fields - only meaningful for regular orders
+      payment_status: formData.order_type === 'regular' ? formData.payment_status : 'unpaid',
+      payment_method: (formData.order_type === 'regular' && formData.payment_status !== 'unpaid') ? formData.payment_method : null,
+      amount_paid: formData.order_type === 'regular' && formData.payment_status === 'partial' ? parseFloat(formData.amount_paid || 0) : null,
+      // Installment scheduling fields - for partial/unpaid
+      schedule_type: (formData.payment_status === 'partial' || formData.payment_status === 'unpaid') ? formData.schedule_type : null,
+      installments_count: (formData.payment_status === 'partial' || formData.payment_status === 'unpaid') ? formData.installments_count : null,
+      interval_days: formData.schedule_type === 'regular' ? formData.interval_days : null,
+      first_due_date: (formData.payment_status === 'partial' || formData.payment_status === 'unpaid') ? formData.first_due_date : null,
+      grace_period_days: (formData.payment_status === 'partial' || formData.payment_status === 'unpaid') ? formData.grace_period_days : null,
+      // Receipt URL - for payment proof
+      receipt_url: (formData.order_type === 'regular' && formData.payment_status !== 'unpaid') ? formData.receipt_url : null,
     };
 
     try {
@@ -601,6 +695,325 @@ const Orders = ({ user, onLogout }) => {
                     {formData.order_type === 'demo' && (
                       <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700">
                         ℹ️ Demo orders: Maximum 6 products, 1 quantity each, Free of charge
+                      </div>
+                    )}
+
+                    {/* Payment Section - Only for Regular Orders */}
+                    {formData.order_type === 'regular' && (
+                      <div className="space-y-3 p-4 bg-green-50 border border-green-200 rounded-lg">
+                        <h3 className="font-semibold text-slate-900 flex items-center gap-2">
+                          <span>💳</span> حالة الدفع
+                        </h3>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          {/* Payment Status */}
+                          <div>
+                            <Label>حالة الدفع *</Label>
+                            <Select
+                              value={formData.payment_status}
+                              onValueChange={(value) => {
+                                setFormData({
+                                  ...formData,
+                                  payment_status: value,
+                                  payment_method: value === 'unpaid' ? '' : formData.payment_method,
+                                  amount_paid: value === 'full' ? '' : (value === 'unpaid' ? '' : formData.amount_paid)
+                                });
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue placeholder="اختر حالة الدفع" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="full">💰 دفع كلي (مدفوعة بالكامل)</SelectItem>
+                                <SelectItem value="partial">📊 دفع جزئي</SelectItem>
+                                <SelectItem value="unpaid">⏳ غير مدفوعة (آجل)</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          {/* Payment Method - Shows for full or partial */}
+                          {(formData.payment_status === 'full' || formData.payment_status === 'partial') && (
+                            <div>
+                              <Label>طريقة الدفع *</Label>
+                              <Select
+                                value={formData.payment_method}
+                                onValueChange={(value) => setFormData({ ...formData, payment_method: value })}
+                              >
+                                <SelectTrigger>
+                                  <SelectValue placeholder="اختر طريقة الدفع" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="bank_transfer">🏦 تحويل بنكي</SelectItem>
+                                  <SelectItem value="e_wallet">📱 محفظة الكترونية</SelectItem>
+                                  <SelectItem value="instapay">⚡ انستاباي</SelectItem>
+                                  <SelectItem value="cash">💵 تحصيل كاش</SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Receipt Upload - Show for full or partial payment */}
+                        {(formData.payment_status === 'full' || formData.payment_status === 'partial') && (
+                          <div className="space-y-2">
+                            <Label className="flex items-center gap-2">
+                              📷 إرفاق إيصال الدفع (اختياري)
+                            </Label>
+
+                            {!formData.receipt_url ? (
+                              <div className="relative">
+                                <input
+                                  type="file"
+                                  accept="image/*,application/pdf"
+                                  onChange={handleReceiptUpload}
+                                  disabled={receiptUploading}
+                                  className="hidden"
+                                  id="receipt-upload"
+                                />
+                                <label
+                                  htmlFor="receipt-upload"
+                                  className={`flex items-center justify-center gap-3 p-4 border-2 border-dashed rounded-lg cursor-pointer transition-all ${receiptUploading
+                                    ? 'border-gray-300 bg-gray-50'
+                                    : 'border-primary/40 hover:border-primary hover:bg-primary/5'
+                                    }`}
+                                >
+                                  {receiptUploading ? (
+                                    <>
+                                      <RefreshCw className="h-5 w-5 animate-spin text-gray-500" />
+                                      <span className="text-gray-500">جاري الرفع...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Package className="h-6 w-6 text-primary" />
+                                      <div className="text-center">
+                                        <p className="font-medium text-slate-700">اضغط لرفع صورة الإيصال</p>
+                                        <p className="text-xs text-slate-500">إيداع / تحويل / شيك (صور أو PDF - حد أقصى 10MB)</p>
+                                      </div>
+                                    </>
+                                  )}
+                                </label>
+                              </div>
+                            ) : (
+                              <div className="relative p-3 bg-green-50 border border-green-200 rounded-lg">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-16 h-16 rounded-lg overflow-hidden border border-green-300 bg-white flex-shrink-0">
+                                    {formData.receipt_url.includes('.pdf') ? (
+                                      <div className="w-full h-full flex items-center justify-center bg-red-50">
+                                        <span className="text-2xl">📄</span>
+                                      </div>
+                                    ) : (
+                                      <img
+                                        src={formData.receipt_url}
+                                        alt="Receipt"
+                                        className="w-full h-full object-cover"
+                                      />
+                                    )}
+                                  </div>
+                                  <div className="flex-1">
+                                    <p className="font-medium text-green-800 flex items-center gap-2">
+                                      <CheckCircle className="h-4 w-4" />
+                                      تم رفع الإيصال
+                                    </p>
+                                    <a
+                                      href={formData.receipt_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="text-xs text-blue-600 hover:underline"
+                                    >
+                                      عرض الإيصال
+                                    </a>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setFormData({ ...formData, receipt_url: '' })}
+                                    className="text-red-500 hover:text-red-700 hover:bg-red-50"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Amount Paid - Only for partial payment */}
+                        {formData.payment_status === 'partial' && (
+                          <div>
+                            <Label>المبلغ المدفوع *</Label>
+                            <Input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              max={calculateTotal()}
+                              value={formData.amount_paid}
+                              onChange={(e) => setFormData({ ...formData, amount_paid: e.target.value })}
+                              placeholder="أدخل المبلغ المدفوع"
+                              className="text-right"
+                            />
+                            {formData.amount_paid && parseFloat(formData.amount_paid) > 0 && (
+                              <p className="text-sm text-orange-600 mt-1">
+                                💡 الباقي كدين: {formatCurrency(calculateTotal() - parseFloat(formData.amount_paid || 0))}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Payment Info Summary */}
+                        {formData.payment_status === 'full' && (
+                          <div className="p-2 bg-green-100 rounded-lg text-sm text-green-700">
+                            ✅ سيتم تسجيل الفاتورة كـ "مدفوعة بالكامل" في قسم الحسابات
+                          </div>
+                        )}
+                        {formData.payment_status === 'partial' && formData.amount_paid && (
+                          <div className="p-2 bg-yellow-100 rounded-lg text-sm text-yellow-700">
+                            ⚠️ سيتم تسجيل {formatCurrency(parseFloat(formData.amount_paid || 0))} كمدفوع والباقي كدين
+                          </div>
+                        )}
+                        {formData.payment_status === 'unpaid' && (
+                          <div className="p-2 bg-orange-100 rounded-lg text-sm text-orange-700">
+                            📋 سيتم تسجيل الفاتورة كـ "غير مدفوعة" في قسم الديون
+                          </div>
+                        )}
+
+                        {/* Installment Scheduling Section - for partial/unpaid */}
+                        {(formData.payment_status === 'partial' || formData.payment_status === 'unpaid') && (
+                          <div className="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-4">
+                            <h4 className="font-semibold text-slate-900 flex items-center gap-2">
+                              <span>📅</span> جدولة الأقساط
+                            </h4>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                              {/* Schedule Type */}
+                              <div>
+                                <Label>نوع الجدولة *</Label>
+                                <Select
+                                  value={formData.schedule_type}
+                                  onValueChange={(value) => setFormData({ ...formData, schedule_type: value })}
+                                >
+                                  <SelectTrigger>
+                                    <SelectValue placeholder="اختر نوع الجدولة" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="monthly">📆 دفعات شهرية</SelectItem>
+                                    <SelectItem value="weekly">📅 دفعات أسبوعية</SelectItem>
+                                    <SelectItem value="regular">⏱️ دفعات منتظمة (كل X يوم)</SelectItem>
+                                    <SelectItem value="custom">✏️ دفعات غير منتظمة (يدوي)</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </div>
+
+                              {/* Installments Count */}
+                              <div>
+                                <Label>عدد الأقساط *</Label>
+                                <Input
+                                  type="number"
+                                  min="1"
+                                  max="24"
+                                  value={formData.installments_count}
+                                  onChange={(e) => setFormData({ ...formData, installments_count: parseInt(e.target.value) || 1 })}
+                                />
+                              </div>
+
+                              {/* Interval Days - for regular type */}
+                              {formData.schedule_type === 'regular' && (
+                                <div>
+                                  <Label>كل كم يوم</Label>
+                                  <Input
+                                    type="number"
+                                    min="1"
+                                    max="365"
+                                    value={formData.interval_days}
+                                    onChange={(e) => setFormData({ ...formData, interval_days: parseInt(e.target.value) || 30 })}
+                                  />
+                                </div>
+                              )}
+
+                              {/* First Due Date */}
+                              <div>
+                                <Label>تاريخ أول قسط *</Label>
+                                <Input
+                                  type="date"
+                                  value={formData.first_due_date}
+                                  onChange={(e) => setFormData({ ...formData, first_due_date: e.target.value })}
+                                  min={new Date().toISOString().split('T')[0]}
+                                />
+                              </div>
+
+                              {/* Grace Period */}
+                              <div>
+                                <Label>فترة السماح (أيام)</Label>
+                                <Input
+                                  type="number"
+                                  min="0"
+                                  max="30"
+                                  value={formData.grace_period_days}
+                                  onChange={(e) => setFormData({ ...formData, grace_period_days: parseInt(e.target.value) || 0 })}
+                                />
+                                <p className="text-xs text-slate-500 mt-1">أيام إضافية قبل اعتبار القسط متأخر</p>
+                              </div>
+                            </div>
+
+                            {/* Calculated Installments Preview */}
+                            {formData.first_due_date && formData.installments_count > 0 && (
+                              <div className="mt-3">
+                                <Label className="mb-2 block">جدول الأقساط المحسوب:</Label>
+                                <div className="bg-white rounded-lg border overflow-hidden">
+                                  <table className="w-full text-sm">
+                                    <thead className="bg-slate-100">
+                                      <tr>
+                                        <th className="px-3 py-2 text-right">القسط</th>
+                                        <th className="px-3 py-2 text-right">المبلغ</th>
+                                        <th className="px-3 py-2 text-right">تاريخ الاستحقاق</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {(() => {
+                                        const total = formData.payment_status === 'partial'
+                                          ? calculateTotal() - parseFloat(formData.amount_paid || 0)
+                                          : calculateTotal();
+                                        const count = formData.installments_count || 1;
+                                        const amountPerInstallment = total / count;
+                                        const firstDate = new Date(formData.first_due_date);
+
+                                        return Array.from({ length: count }, (_, i) => {
+                                          let dueDate = new Date(firstDate);
+                                          if (formData.schedule_type === 'monthly') {
+                                            dueDate.setMonth(dueDate.getMonth() + i);
+                                          } else if (formData.schedule_type === 'weekly') {
+                                            dueDate.setDate(dueDate.getDate() + (i * 7));
+                                          } else {
+                                            dueDate.setDate(dueDate.getDate() + (i * (formData.interval_days || 30)));
+                                          }
+
+                                          return (
+                                            <tr key={i} className="border-t">
+                                              <td className="px-3 py-2">{i + 1}</td>
+                                              <td className="px-3 py-2">{formatCurrency(amountPerInstallment)}</td>
+                                              <td className="px-3 py-2">{dueDate.toLocaleDateString('ar-EG')}</td>
+                                            </tr>
+                                          );
+                                        });
+                                      })()}
+                                    </tbody>
+                                    <tfoot className="bg-slate-50 font-semibold">
+                                      <tr>
+                                        <td className="px-3 py-2">الإجمالي</td>
+                                        <td className="px-3 py-2" colSpan="2">
+                                          {formatCurrency(formData.payment_status === 'partial'
+                                            ? calculateTotal() - parseFloat(formData.amount_paid || 0)
+                                            : calculateTotal()
+                                          )}
+                                        </td>
+                                      </tr>
+                                    </tfoot>
+                                  </table>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
 

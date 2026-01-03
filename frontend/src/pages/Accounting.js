@@ -77,6 +77,25 @@ const Accounting = ({ user, onLogout }) => {
     const [alerts, setAlerts] = useState([]);
     const [alertsLoading, setAlertsLoading] = useState(false);
 
+    // Installments State
+    const [installments, setInstallments] = useState([]);
+    const [installmentsLoading, setInstallmentsLoading] = useState(false);
+    const [installmentsSummary, setInstallmentsSummary] = useState(null);
+    const [installmentFilter, setInstallmentFilter] = useState('all');
+    const [showPayInstallmentDialog, setShowPayInstallmentDialog] = useState(false);
+    const [selectedInstallment, setSelectedInstallment] = useState(null);
+    const [installmentPaymentForm, setInstallmentPaymentForm] = useState({ amount: '', payment_method: 'cash', notes: '' });
+    const [installmentPaymentLoading, setInstallmentPaymentLoading] = useState(false);
+
+    // Reschedule State
+    const [showRescheduleDialog, setShowRescheduleDialog] = useState(false);
+    const [rescheduleForm, setRescheduleForm] = useState({ new_due_date: '', reason: '' });
+    const [rescheduleLoading, setRescheduleLoading] = useState(false);
+
+    // Analytics State
+    const [installmentsAnalytics, setInstallmentsAnalytics] = useState(null);
+    const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
     // Filters
     const [filterStatus, setFilterStatus] = useState('all');
     const [searchQuery, setSearchQuery] = useState('');
@@ -218,6 +237,138 @@ const Accounting = ({ user, onLogout }) => {
             console.error('Failed to load alerts:', error);
         } finally {
             setAlertsLoading(false);
+        }
+    };
+
+    const fetchInstallments = async () => {
+        setInstallmentsLoading(true);
+        try {
+            const params = new URLSearchParams();
+            if (installmentFilter && installmentFilter !== 'all') params.append('status', installmentFilter);
+            const response = await api.get(`/installments?${params.toString()}`);
+            setInstallments(response.data.items || []);
+        } catch (error) {
+            console.error('Failed to load installments:', error);
+            toast.error('فشل في تحميل الأقساط');
+        } finally {
+            setInstallmentsLoading(false);
+        }
+    };
+
+    const fetchInstallmentsSummary = async () => {
+        try {
+            const response = await api.get('/installments/summary');
+            setInstallmentsSummary(response.data);
+        } catch (error) {
+            console.error('Failed to load installments summary:', error);
+        }
+    };
+
+    const fetchInstallmentsAnalytics = async () => {
+        setAnalyticsLoading(true);
+        try {
+            const response = await api.get('/installments/analytics');
+            setInstallmentsAnalytics(response.data);
+        } catch (error) {
+            console.error('Failed to load installments analytics:', error);
+        } finally {
+            setAnalyticsLoading(false);
+        }
+    };
+
+    const handleExportInstallments = async () => {
+        try {
+            const params = new URLSearchParams();
+            if (installmentFilter && installmentFilter !== 'all') params.append('status', installmentFilter);
+            const response = await api.get(`/installments/export?${params.toString()}`, {
+                responseType: 'blob'
+            });
+            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', `installments_report_${new Date().toISOString().split('T')[0]}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            toast.success('تم تحميل التقرير بنجاح');
+        } catch (error) {
+            console.error('Failed to export installments:', error);
+            toast.error('فشل في تحميل التقرير');
+        }
+    };
+
+    const handlePayInstallment = async (e) => {
+        e.preventDefault();
+        if (!selectedInstallment || !installmentPaymentForm.amount) {
+            toast.error('يرجى إدخال المبلغ');
+            return;
+        }
+        setInstallmentPaymentLoading(true);
+        try {
+            await api.post(`/installments/${selectedInstallment.id}/pay`, {
+                amount: parseFloat(installmentPaymentForm.amount),
+                payment_method: installmentPaymentForm.payment_method,
+                notes: installmentPaymentForm.notes || null
+            });
+            toast.success('تم تسجيل الدفعة بنجاح');
+            setShowPayInstallmentDialog(false);
+            setInstallmentPaymentForm({ amount: '', payment_method: 'cash', notes: '' });
+            fetchInstallments();
+            fetchInstallmentsSummary();
+            fetchDashboard();
+        } catch (error) {
+            toast.error(error.response?.data?.detail || 'فشل في تسجيل الدفعة');
+        } finally {
+            setInstallmentPaymentLoading(false);
+        }
+    };
+
+    const openPayInstallmentDialog = (installment) => {
+        setSelectedInstallment(installment);
+        setInstallmentPaymentForm({ amount: installment.remaining_amount?.toString() || '', payment_method: 'cash', notes: '' });
+        setShowPayInstallmentDialog(true);
+    };
+
+    const getInstallmentStatusBadge = (status) => {
+        const styles = {
+            'upcoming': { bg: 'bg-blue-100', text: 'text-blue-700', label: 'قادم' },
+            'due': { bg: 'bg-yellow-100', text: 'text-yellow-700', label: 'مستحق' },
+            'grace': { bg: 'bg-orange-100', text: 'text-orange-700', label: 'فترة سماح' },
+            'overdue': { bg: 'bg-red-100', text: 'text-red-700', label: 'متأخر' },
+            'paid': { bg: 'bg-green-100', text: 'text-green-700', label: 'مدفوع' },
+            'partial': { bg: 'bg-purple-100', text: 'text-purple-700', label: 'مدفوع جزئياً' }
+        };
+        const style = styles[status] || styles['upcoming'];
+        return <Badge className={`${style.bg} ${style.text}`}>{style.label}</Badge>;
+    };
+
+    const openRescheduleDialog = (installment) => {
+        setSelectedInstallment(installment);
+        setRescheduleForm({ new_due_date: '', reason: '' });
+        setShowRescheduleDialog(true);
+    };
+
+    const handleRescheduleInstallment = async (e) => {
+        e.preventDefault();
+        if (!selectedInstallment || !rescheduleForm.new_due_date || !rescheduleForm.reason) {
+            toast.error('يرجى إدخال التاريخ الجديد وسبب التأجيل');
+            return;
+        }
+        setRescheduleLoading(true);
+        try {
+            await api.post(`/installments/${selectedInstallment.id}/reschedule`, {
+                new_due_date: rescheduleForm.new_due_date,
+                reason: rescheduleForm.reason
+            });
+            toast.success('تم إعادة جدولة القسط بنجاح');
+            setShowRescheduleDialog(false);
+            setRescheduleForm({ new_due_date: '', reason: '' });
+            fetchInstallments();
+            fetchInstallmentsSummary();
+        } catch (error) {
+            toast.error(error.response?.data?.detail || 'فشل في إعادة الجدولة');
+        } finally {
+            setRescheduleLoading(false);
         }
     };
 
@@ -403,7 +554,7 @@ const Accounting = ({ user, onLogout }) => {
 
                 {/* Main Tabs */}
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                    <TabsList className="grid w-full grid-cols-3 lg:grid-cols-7 mb-6 h-auto gap-1 bg-slate-100 p-1 rounded-xl">
+                    <TabsList className="grid w-full grid-cols-4 lg:grid-cols-8 mb-6 h-auto gap-1 bg-slate-100 p-1 rounded-xl">
                         <TabsTrigger value="dashboard" className="data-[state=active]:bg-white rounded-lg py-2">
                             <BarChart3 className="h-4 w-4 mr-1" />
                             <span className="hidden sm:inline">Dashboard</span>
@@ -431,6 +582,10 @@ const Accounting = ({ user, onLogout }) => {
                         <TabsTrigger value="audit" onClick={fetchAuditLog} className="data-[state=active]:bg-white rounded-lg py-2">
                             <History className="h-4 w-4 mr-1" />
                             <span className="hidden sm:inline">السجل</span>
+                        </TabsTrigger>
+                        <TabsTrigger value="installments" onClick={() => { fetchInstallments(); fetchInstallmentsSummary(); }} className="data-[state=active]:bg-white rounded-lg py-2">
+                            <Calendar className="h-4 w-4 mr-1" />
+                            <span className="hidden sm:inline">الأقساط</span>
                         </TabsTrigger>
                     </TabsList>
 
@@ -1183,7 +1338,283 @@ const Accounting = ({ user, onLogout }) => {
                             </Card>
                         )}
                     </TabsContent>
+
+                    {/* ═══════════════════════════════════════════════════════════════════════════ */}
+                    {/* INSTALLMENTS TAB */}
+                    {/* ═══════════════════════════════════════════════════════════════════════════ */}
+                    <TabsContent value="installments" className="space-y-4">
+                        {/* Summary Cards */}
+                        {installmentsSummary && (
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                <Card className="p-4 bg-gradient-to-br from-red-50 to-red-100 border-red-200">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-12 h-12 bg-red-500 rounded-full flex items-center justify-center">
+                                            <AlertTriangle className="h-6 w-6 text-white" />
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-red-600 font-medium">أقساط متأخرة</p>
+                                            <p className="text-xl font-bold text-red-900">{installmentsSummary.overdue_count}</p>
+                                            <p className="text-xs text-red-600">{formatCurrency(installmentsSummary.overdue_amount)}</p>
+                                        </div>
+                                    </div>
+                                </Card>
+                                <Card className="p-4 bg-gradient-to-br from-yellow-50 to-yellow-100 border-yellow-200">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-12 h-12 bg-yellow-500 rounded-full flex items-center justify-center">
+                                            <Clock className="h-6 w-6 text-white" />
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-yellow-600 font-medium">مستحقة اليوم</p>
+                                            <p className="text-xl font-bold text-yellow-900">{installmentsSummary.due_today_count}</p>
+                                        </div>
+                                    </div>
+                                </Card>
+                                <Card className="p-4 bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-12 h-12 bg-blue-500 rounded-full flex items-center justify-center">
+                                            <Calendar className="h-6 w-6 text-white" />
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-blue-600 font-medium">قادمة (7 أيام)</p>
+                                            <p className="text-xl font-bold text-blue-900">{installmentsSummary.upcoming_week_count}</p>
+                                        </div>
+                                    </div>
+                                </Card>
+                            </div>
+                        )}
+
+                        {/* Filters */}
+                        <Card className="p-4">
+                            <div className="flex flex-wrap gap-4 items-end">
+                                <div>
+                                    <Label>الحالة</Label>
+                                    <Select value={installmentFilter} onValueChange={setInstallmentFilter}>
+                                        <SelectTrigger className="w-40">
+                                            <SelectValue />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            <SelectItem value="all">الكل</SelectItem>
+                                            <SelectItem value="overdue">متأخر</SelectItem>
+                                            <SelectItem value="due">مستحق</SelectItem>
+                                            <SelectItem value="grace">فترة سماح</SelectItem>
+                                            <SelectItem value="upcoming">قادم</SelectItem>
+                                            <SelectItem value="partial">مدفوع جزئياً</SelectItem>
+                                            <SelectItem value="paid">مدفوع</SelectItem>
+                                        </SelectContent>
+                                    </Select>
+                                </div>
+                                <Button onClick={fetchInstallments} variant="outline">
+                                    <RefreshCw className="h-4 w-4 mr-2" />
+                                    تحديث
+                                </Button>
+                                <Button onClick={handleExportInstallments} variant="outline" className="border-emerald-500 text-emerald-600 hover:bg-emerald-50">
+                                    <Download className="h-4 w-4 mr-2" />
+                                    تصدير CSV
+                                </Button>
+                            </div>
+                        </Card>
+
+                        {/* Installments List */}
+                        {installmentsLoading ? (
+                            <div className="text-center py-12">
+                                <RefreshCw className="h-8 w-8 animate-spin mx-auto text-slate-400" />
+                            </div>
+                        ) : (
+                            <div className="grid gap-4">
+                                {installments.map((inst) => (
+                                    <Card key={inst.id} className="p-4 hover:shadow-md transition-shadow">
+                                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-3 mb-2">
+                                                    <span className="text-lg font-bold text-slate-900">
+                                                        قسط #{inst.installment_number} - فاتورة #{inst.invoice_number}
+                                                    </span>
+                                                    {getInstallmentStatusBadge(inst.status)}
+                                                </div>
+                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                                                    <div>
+                                                        <span className="text-slate-500">العيادة:</span>
+                                                        <span className="font-medium mr-1">{inst.clinic_name}</span>
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-slate-500">تاريخ الاستحقاق:</span>
+                                                        <span className="font-medium mr-1">
+                                                            {inst.due_date ? format(new Date(inst.due_date), 'dd/MM/yyyy') : '-'}
+                                                        </span>
+                                                    </div>
+                                                    {inst.rescheduled_from && (
+                                                        <div className="text-orange-600">
+                                                            <span>مؤجل من:</span>
+                                                            <span className="mr-1">{format(new Date(inst.rescheduled_from), 'dd/MM/yyyy')}</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <div className="flex flex-col items-end gap-2">
+                                                <div className="text-right">
+                                                    <p className="text-2xl font-bold text-slate-900">{formatCurrency(inst.amount)}</p>
+                                                    <div className="flex gap-4 text-sm">
+                                                        <span className="text-emerald-600">مدفوع: {formatCurrency(inst.paid_amount)}</span>
+                                                        <span className="text-orange-600">متبقي: {formatCurrency(inst.remaining_amount)}</span>
+                                                    </div>
+                                                </div>
+                                                {inst.status !== 'paid' && (
+                                                    <div className="flex gap-2">
+                                                        <Button
+                                                            size="sm"
+                                                            onClick={() => openPayInstallmentDialog(inst)}
+                                                            className="bg-emerald-600 hover:bg-emerald-700"
+                                                        >
+                                                            <CreditCard className="h-4 w-4 mr-1" />
+                                                            دفع القسط
+                                                        </Button>
+                                                        {(user?.role === 'super_admin' || user?.role === 'accountant') && (
+                                                            <Button
+                                                                size="sm"
+                                                                variant="outline"
+                                                                onClick={() => openRescheduleDialog(inst)}
+                                                                className="border-orange-500 text-orange-600 hover:bg-orange-50"
+                                                            >
+                                                                <Calendar className="h-4 w-4 mr-1" />
+                                                                إعادة جدولة
+                                                            </Button>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </Card>
+                                ))}
+
+                                {installments.length === 0 && (
+                                    <div className="text-center py-8">
+                                        <Calendar className="h-12 w-12 mx-auto text-slate-300 mb-4" />
+                                        <p className="text-slate-500">لا توجد أقساط</p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </TabsContent>
                 </Tabs>
+
+                {/* ═══════════════════════════════════════════════════════════════════════════ */}
+                {/* PAY INSTALLMENT DIALOG */}
+                {/* ═══════════════════════════════════════════════════════════════════════════ */}
+                <Dialog open={showPayInstallmentDialog} onOpenChange={setShowPayInstallmentDialog}>
+                    <DialogContent className="max-w-md">
+                        <DialogHeader>
+                            <DialogTitle>دفع قسط</DialogTitle>
+                        </DialogHeader>
+                        <form onSubmit={handlePayInstallment} className="space-y-4">
+                            {selectedInstallment && (
+                                <div className="p-4 bg-slate-50 rounded-lg">
+                                    <p className="font-medium">قسط #{selectedInstallment.installment_number} - فاتورة #{selectedInstallment.invoice_number}</p>
+                                    <p className="text-sm text-slate-600">{selectedInstallment.clinic_name}</p>
+                                    <p className="text-sm text-orange-600">المتبقي: {formatCurrency(selectedInstallment.remaining_amount)}</p>
+                                </div>
+                            )}
+
+                            <div>
+                                <Label>المبلغ *</Label>
+                                <Input
+                                    type="number"
+                                    step="0.01"
+                                    max={selectedInstallment?.remaining_amount}
+                                    value={installmentPaymentForm.amount}
+                                    onChange={(e) => setInstallmentPaymentForm({ ...installmentPaymentForm, amount: e.target.value })}
+                                    required
+                                />
+                                <p className="text-xs text-slate-500 mt-1">يمكنك دفع جزء من القسط أو المبلغ كاملاً</p>
+                            </div>
+
+                            <div>
+                                <Label>طريقة الدفع</Label>
+                                <Select value={installmentPaymentForm.payment_method} onValueChange={(v) => setInstallmentPaymentForm({ ...installmentPaymentForm, payment_method: v })}>
+                                    <SelectTrigger>
+                                        <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                        <SelectItem value="cash">نقدي</SelectItem>
+                                        <SelectItem value="bank_transfer">تحويل بنكي</SelectItem>
+                                        <SelectItem value="e_wallet">محفظة إلكترونية</SelectItem>
+                                        <SelectItem value="instapay">إنستا باي</SelectItem>
+                                    </SelectContent>
+                                </Select>
+                            </div>
+
+                            <div>
+                                <Label>ملاحظات (اختياري)</Label>
+                                <Textarea
+                                    value={installmentPaymentForm.notes}
+                                    onChange={(e) => setInstallmentPaymentForm({ ...installmentPaymentForm, notes: e.target.value })}
+                                    rows={2}
+                                />
+                            </div>
+
+                            <DialogFooter>
+                                <Button type="button" variant="outline" onClick={() => setShowPayInstallmentDialog(false)}>
+                                    إلغاء
+                                </Button>
+                                <Button type="submit" disabled={installmentPaymentLoading} className="bg-emerald-600 hover:bg-emerald-700">
+                                    {installmentPaymentLoading ? 'جاري التسجيل...' : 'تسجيل الدفعة'}
+                                </Button>
+                            </DialogFooter>
+                        </form>
+                    </DialogContent>
+                </Dialog>
+
+                {/* ═══════════════════════════════════════════════════════════════════════════ */}
+                {/* RESCHEDULE INSTALLMENT DIALOG */}
+                {/* ═══════════════════════════════════════════════════════════════════════════ */}
+                <Dialog open={showRescheduleDialog} onOpenChange={setShowRescheduleDialog}>
+                    <DialogContent className="max-w-md">
+                        <DialogHeader>
+                            <DialogTitle>إعادة جدولة القسط</DialogTitle>
+                        </DialogHeader>
+                        <form onSubmit={handleRescheduleInstallment} className="space-y-4">
+                            {selectedInstallment && (
+                                <div className="p-4 bg-slate-50 rounded-lg">
+                                    <p className="font-medium">قسط #{selectedInstallment.installment_number} - فاتورة #{selectedInstallment.invoice_number}</p>
+                                    <p className="text-sm text-slate-600">{selectedInstallment.clinic_name}</p>
+                                    <p className="text-sm text-orange-600">
+                                        التاريخ الحالي: {selectedInstallment.due_date ? format(new Date(selectedInstallment.due_date), 'dd/MM/yyyy') : '-'}
+                                    </p>
+                                </div>
+                            )}
+
+                            <div>
+                                <Label>التاريخ الجديد *</Label>
+                                <Input
+                                    type="date"
+                                    value={rescheduleForm.new_due_date}
+                                    onChange={(e) => setRescheduleForm({ ...rescheduleForm, new_due_date: e.target.value })}
+                                    required
+                                />
+                            </div>
+
+                            <div>
+                                <Label>سبب التأجيل *</Label>
+                                <Textarea
+                                    value={rescheduleForm.reason}
+                                    onChange={(e) => setRescheduleForm({ ...rescheduleForm, reason: e.target.value })}
+                                    rows={3}
+                                    placeholder="اكتب سبب إعادة جدولة هذا القسط..."
+                                    required
+                                />
+                            </div>
+
+                            <DialogFooter>
+                                <Button type="button" variant="outline" onClick={() => setShowRescheduleDialog(false)}>
+                                    إلغاء
+                                </Button>
+                                <Button type="submit" disabled={rescheduleLoading} className="bg-orange-600 hover:bg-orange-700">
+                                    {rescheduleLoading ? 'جاري الحفظ...' : 'حفظ التأجيل'}
+                                </Button>
+                            </DialogFooter>
+                        </form>
+                    </DialogContent>
+                </Dialog>
 
                 {/* ═══════════════════════════════════════════════════════════════════════════ */}
                 {/* PAYMENT DIALOG */}

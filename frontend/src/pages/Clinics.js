@@ -787,79 +787,37 @@ const Clinics = ({ user, onLogout }) => {
                       )}
                     </div>
 
-                    {/* Location Buttons */}
-                    <div className="grid grid-cols-2 gap-3">
-                      {/* High Accuracy Location Button */}
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={handleGetLocation}
-                        disabled={gettingLocation || isTrackingLocation}
-                        className="rounded-full"
-                      >
-                        <Target className="h-4 w-4 mr-2" />
-                        {gettingLocation && !isTrackingLocation ? 'جاري التحديد...' : 'تحديد دقيق'}
-                      </Button>
-
-                      {/* Real-time Tracking Toggle */}
-                      <Button
-                        type="button"
-                        variant={isTrackingLocation ? "destructive" : "default"}
-                        onClick={isTrackingLocation ? stopLocationTracking : startLocationTracking}
-                        disabled={gettingLocation && !isTrackingLocation}
-                        className="rounded-full"
-                      >
-                        {isTrackingLocation ? (
-                          <>
-                            <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-                            إيقاف التتبع
-                          </>
-                        ) : (
-                          <>
-                            <Crosshair className="h-4 w-4 mr-2" />
-                            تتبع مباشر
-                          </>
-                        )}
-                      </Button>
-                    </div>
-
-                    {/* Accuracy Indicator */}
-                    {accuracyInfo && locationAccuracy && (
-                      <div className={`p-3 rounded-lg border ${accuracyInfo.level === 'ULTRA' || accuracyInfo.level === 'HIGH'
-                        ? 'bg-green-50 border-green-200'
-                        : accuracyInfo.level === 'MEDIUM'
-                          ? 'bg-yellow-50 border-yellow-200'
-                          : 'bg-orange-50 border-orange-200'
+                    {/* Accuracy Indicator - Only shown when location is being tracked or has been set */}
+                    {locationAccuracy && (
+                      <div className={`p-3 rounded-lg border ${locationAccuracy <= 10 ? 'bg-green-50 border-green-200' :
+                          locationAccuracy <= 30 ? 'bg-teal-50 border-teal-200' :
+                            locationAccuracy <= 100 ? 'bg-yellow-50 border-yellow-200' :
+                              'bg-orange-50 border-orange-200'
                         }`}>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <span className="text-lg">{accuracyInfo.icon}</span>
-                            <span className={`font-medium ${accuracyInfo.level === 'ULTRA' || accuracyInfo.level === 'HIGH'
-                              ? 'text-green-800'
-                              : accuracyInfo.level === 'MEDIUM'
-                                ? 'text-yellow-800'
-                                : 'text-orange-800'
+                            <span className="text-lg">
+                              {locationAccuracy <= 10 ? '🎯' : locationAccuracy <= 30 ? '✅' : locationAccuracy <= 100 ? '⚠️' : '📍'}
+                            </span>
+                            <span className={`font-medium ${locationAccuracy <= 10 ? 'text-green-800' :
+                                locationAccuracy <= 30 ? 'text-teal-800' :
+                                  locationAccuracy <= 100 ? 'text-yellow-800' :
+                                    'text-orange-800'
                               }`}>
-                              {accuracyInfo.label}
+                              {locationAccuracy <= 10 ? 'دقة متناهية' :
+                                locationAccuracy <= 30 ? 'دقة عالية' :
+                                  locationAccuracy <= 100 ? 'دقة متوسطة' : 'دقة منخفضة'}
                             </span>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-sm font-bold">
-                              ± {Math.round(locationAccuracy)} متر
-                            </span>
-                            {isTrackingLocation && (
-                              <span className="flex h-2 w-2">
-                                <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
-                                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-                              </span>
-                            )}
-                          </div>
+                          <span className="font-mono text-sm font-bold">
+                            ± {Math.round(locationAccuracy)} متر
+                          </span>
                         </div>
                       </div>
                     )}
 
                     <p className="text-xs text-slate-500 text-center">
-                      استخدم "تتبع مباشر" للحصول على أعلى دقة ممكنة • الدائرة تظهر نطاق الدقة
+                      اضغط على زر 📍 على الخريطة لتحديد موقعك • أو اضغط على أي مكان لوضع الدبوس يدوياً
                     </p>
                   </div>
 

@@ -8,7 +8,7 @@ import { Textarea } from '../components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '../components/ui/alert-dialog';
-import { Plus, MapPin, CheckCircle, Clock, Edit, Trash2, Star, LayoutGrid, List, AlignJustify, Eye, X } from 'lucide-react';
+import { Plus, MapPin, CheckCircle, Clock, Edit, Trash2, Star, LayoutGrid, List, AlignJustify, Eye, X, Package, ShoppingCart, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '../utils/api';
 import { getHighAccuracyLocation } from '../utils/gps';
@@ -31,20 +31,38 @@ const Visits = ({ user, onLogout }) => {
     visit_reason: '',
     visit_result: '',
     notes: '',
-    attendees: '',
+    attendees: [],  // Changed to array for autocomplete
+    attendees_text: '', // Text input for searching
     samples_provided: [],
     follow_up_date: '',
     visit_rating: 0,
     latitude: null,
     longitude: null,
     status: 'completed',
+    // Embedded Order Data
+    embedded_order: {
+      enabled: false,
+      order_type: '', // 'demo' or 'regular'
+      products: [],   // [{product_id, quantity, price, discount}]
+      total_amount: 0,
+      discount_type: 'percentage',
+      discount_value: 0,
+      payment_method: 'cash',
+      notes: ''
+    }
   });
   const [loading, setLoading] = useState(false);
+
+  // Attendees Autocomplete
+  const [users, setUsers] = useState([]);
+  const [attendeesSearch, setAttendeesSearch] = useState('');
+  const [showAttendeeSuggestions, setShowAttendeeSuggestions] = useState(false);
 
   useEffect(() => {
     fetchVisits();
     fetchClinics();
     fetchProducts();
+    fetchUsers();
   }, []);
 
   const fetchVisits = async () => {
@@ -74,21 +92,42 @@ const Visits = ({ user, onLogout }) => {
     }
   };
 
+  const fetchUsers = async (search = '') => {
+    try {
+      const response = await api.get(`/users/autocomplete?q=${search}`);
+      setUsers(response.data);
+    } catch (error) {
+      console.error('Failed to load users');
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       clinic_id: '',
       visit_reason: '',
       visit_result: '',
       notes: '',
-      attendees: '',
+      attendees: [],
+      attendees_text: '',
       samples_provided: [],
       follow_up_date: '',
       visit_rating: 0,
       latitude: null,
       longitude: null,
       status: 'completed',
+      embedded_order: {
+        enabled: false,
+        order_type: '',
+        products: [],
+        total_amount: 0,
+        discount_type: 'percentage',
+        discount_value: 0,
+        payment_method: 'cash',
+        notes: ''
+      }
     });
     setEditingVisit(null);
+    setAttendeesSearch('');
   };
 
   const handleEdit = (visit) => {
@@ -98,16 +137,112 @@ const Visits = ({ user, onLogout }) => {
       visit_reason: visit.visit_reason || '',
       visit_result: visit.visit_result || '',
       notes: visit.notes || '',
-      attendees: visit.attendees || '',
+      attendees: visit.attendees || [],
+      attendees_text: '',
       samples_provided: visit.samples_provided || [],
       follow_up_date: visit.follow_up_date ? new Date(visit.follow_up_date).toISOString().slice(0, 16) : '',
       visit_rating: visit.visit_rating || 0,
       latitude: visit.latitude,
       longitude: visit.longitude,
       status: visit.status,
+      embedded_order: visit.embedded_order || {
+        enabled: false,
+        order_type: '',
+        products: [],
+        total_amount: 0,
+        discount_type: 'percentage',
+        discount_value: 0,
+        payment_method: 'cash',
+        notes: ''
+      }
     });
     setShowDialog(true);
   };
+
+  // Embedded Order Helpers
+  const addOrderProduct = () => {
+    const newProducts = [...formData.embedded_order.products, { product_id: '', quantity: 1, price: 0 }];
+    updateEmbeddedOrder('products', newProducts);
+    calculateOrderTotal(newProducts);
+  };
+
+  const removeOrderProduct = (index) => {
+    const newProducts = formData.embedded_order.products.filter((_, i) => i !== index);
+    updateEmbeddedOrder('products', newProducts);
+    calculateOrderTotal(newProducts);
+  };
+
+  const updateOrderProduct = (index, field, value) => {
+    const newProducts = formData.embedded_order.products.map((item, i) => {
+      if (i !== index) return item;
+      const updated = { ...item, [field]: value };
+      // Auto-fill price when product selected
+      if (field === 'product_id') {
+        const product = products.find(p => p.id === value);
+        if (product) {
+          updated.price = product.price;
+          updated.product_name = product.name;
+        }
+      }
+      return updated;
+    });
+    updateEmbeddedOrder('products', newProducts);
+    calculateOrderTotal(newProducts);
+  };
+
+  const updateEmbeddedOrder = (field, value) => {
+    setFormData({
+      ...formData,
+      embedded_order: {
+        ...formData.embedded_order,
+        [field]: value
+      }
+    });
+  };
+
+  const calculateOrderTotal = (orderProducts) => {
+    const subtotal = orderProducts.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+    let total = subtotal;
+
+    const discount = formData.embedded_order.discount_value || 0;
+    if (formData.embedded_order.discount_type === 'percentage') {
+      total = subtotal - (subtotal * discount / 100);
+    } else {
+      total = subtotal - discount;
+    }
+
+    updateEmbeddedOrder('total_amount', Math.max(0, total));
+  };
+
+  // Attendees Autocomplete Helpers
+  const handleAttendeesSearchChange = async (searchText) => {
+    setAttendeesSearch(searchText);
+    if (searchText.length >= 2) {
+      await fetchUsers(searchText);
+      setShowAttendeeSuggestions(true);
+    } else {
+      setShowAttendeeSuggestions(false);
+    }
+  };
+
+  const addAttendee = (user) => {
+    if (!formData.attendees.find(a => a.id === user.id)) {
+      setFormData({
+        ...formData,
+        attendees: [...formData.attendees, { id: user.id, name: user.full_name }]
+      });
+    }
+    setAttendeesSearch('');
+    setShowAttendeeSuggestions(false);
+  };
+
+  const removeAttendee = (userId) => {
+    setFormData({
+      ...formData,
+      attendees: formData.attendees.filter(a => a.id !== userId)
+    });
+  };
+
 
   const handleDeleteClick = (visit) => {
     setVisitToDelete(visit);
@@ -452,57 +587,181 @@ const Visits = ({ user, onLogout }) => {
                       </div>
                     </div>
 
-                    {/* Attendees */}
-                    <div>
-                      <Label htmlFor="attendees">Attendees</Label>
-                      <Input
-                        id="attendees"
-                        value={formData.attendees}
-                        onChange={(e) => setFormData({ ...formData, attendees: e.target.value })}
-                        placeholder="e.g., Dr. Ahmed, Head Nurse"
-                      />
+                    {/* Attendees Autocomplete */}
+                    <div className="relative">
+                      <Label>الحاضرون</Label>
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {formData.attendees.map((attendee) => (
+                          <span
+                            key={attendee.id}
+                            className="inline-flex items-center gap-1 px-2 py-1 bg-primary/10 text-primary rounded-full text-sm"
+                          >
+                            {attendee.name}
+                            <button
+                              type="button"
+                              onClick={() => removeAttendee(attendee.id)}
+                              className="hover:bg-primary/20 rounded-full p-0.5"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
+                        <Input
+                          value={attendeesSearch}
+                          onChange={(e) => handleAttendeesSearchChange(e.target.value)}
+                          placeholder="ابحث عن شخص لإضافته..."
+                          className="pl-10"
+                          onFocus={() => attendeesSearch.length >= 2 && setShowAttendeeSuggestions(true)}
+                          onBlur={() => setTimeout(() => setShowAttendeeSuggestions(false), 200)}
+                        />
+                        {showAttendeeSuggestions && users.length > 0 && (
+                          <div className="absolute top-full left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-50 max-h-40 overflow-y-auto">
+                            {users.map((user) => (
+                              <button
+                                key={user.id}
+                                type="button"
+                                onClick={() => addAttendee(user)}
+                                className="w-full text-left px-3 py-2 hover:bg-slate-50 text-sm flex justify-between items-center"
+                              >
+                                <span>{user.full_name}</span>
+                                <span className="text-xs text-slate-400">{user.role}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
 
-                    {/* Samples Section */}
-                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
-                      <div className="flex items-center justify-between mb-3">
-                        <Label>Samples Provided</Label>
-                        <Button type="button" variant="outline" size="sm" onClick={addSample} className="text-xs h-8">
-                          <Plus className="h-3 w-3 mr-1" /> Add Sample
-                        </Button>
-                      </div>
-                      {formData.samples_provided.length === 0 && <p className="text-xs text-slate-400 italic">No samples added</p>}
-                      {formData.samples_provided.map((sample, idx) => (
-                        <div key={idx} className="flex gap-2 mb-2 items-center">
-                          <Select
-                            value={sample.product_id}
-                            onValueChange={(value) => updateSample(idx, 'product_id', value)}
+                    {/* Embedded Order Section - Shows based on visit_reason */}
+                    {(formData.visit_reason === 'product_demo' || formData.visit_reason === 'place_order') && (
+                      <div className={`p-4 rounded-lg border-2 ${formData.visit_reason === 'product_demo'
+                        ? 'bg-purple-50 border-purple-200'
+                        : 'bg-green-50 border-green-200'
+                        }`}>
+                        <div className="flex items-center justify-between mb-4">
+                          <div className="flex items-center gap-2">
+                            {formData.visit_reason === 'product_demo' ? (
+                              <Package className="h-5 w-5 text-purple-600" />
+                            ) : (
+                              <ShoppingCart className="h-5 w-5 text-green-600" />
+                            )}
+                            <Label className="text-base font-semibold">
+                              {formData.visit_reason === 'product_demo' ? '📦 طلب عينات (Demo)' : '🛒 طلب عادي'}
+                            </Label>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={addOrderProduct}
+                            className="text-xs h-8"
                           >
-                            <SelectTrigger className="flex-1 bg-white">
-                              <SelectValue placeholder="Product" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {products.map((product) => (
-                                <SelectItem key={product.id} value={product.id}>
-                                  {product.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <Input
-                            type="number"
-                            min="1"
-                            value={sample.quantity}
-                            onChange={(e) => updateSample(idx, 'quantity', e.target.value)}
-                            className="w-20 bg-white"
-                            placeholder="Qty"
-                          />
-                          <Button type="button" variant="ghost" size="icon" onClick={() => removeSample(idx)} className="h-8 w-8 text-red-500 hover:bg-red-50">
-                            <Trash2 className="h-4 w-4" />
+                            <Plus className="h-3 w-3 mr-1" /> إضافة منتج
                           </Button>
                         </div>
-                      ))}
-                    </div>
+
+                        {formData.embedded_order.products.length === 0 && (
+                          <p className="text-xs text-slate-500 italic text-center py-3 bg-white/50 rounded">
+                            لم يتم إضافة منتجات بعد
+                          </p>
+                        )}
+
+                        {formData.embedded_order.products.map((item, idx) => (
+                          <div key={idx} className="flex gap-2 mb-2 items-center bg-white/70 p-2 rounded-lg">
+                            <Select
+                              value={item.product_id}
+                              onValueChange={(value) => updateOrderProduct(idx, 'product_id', value)}
+                            >
+                              <SelectTrigger className="flex-1 bg-white">
+                                <SelectValue placeholder="المنتج" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {products.map((product) => (
+                                  <SelectItem key={product.id} value={product.id}>
+                                    {product.name} - {product.price} ج.م
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Input
+                              type="number"
+                              min="1"
+                              value={item.quantity}
+                              onChange={(e) => updateOrderProduct(idx, 'quantity', parseInt(e.target.value) || 1)}
+                              className="w-20 bg-white"
+                              placeholder="الكمية"
+                            />
+                            <span className="text-sm font-medium w-24 text-left">
+                              {(item.price * item.quantity).toFixed(2)} ج.م
+                            </span>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              onClick={() => removeOrderProduct(idx)}
+                              className="h-8 w-8 text-red-500 hover:bg-red-50"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ))}
+
+                        {formData.embedded_order.products.length > 0 && (
+                          <>
+                            <div className="mt-4 pt-4 border-t border-slate-200 space-y-3">
+                              {/* Payment Method for regular orders */}
+                              {formData.visit_reason === 'place_order' && (
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div>
+                                    <Label className="text-xs">طريقة الدفع</Label>
+                                    <Select
+                                      value={formData.embedded_order.payment_method}
+                                      onValueChange={(v) => updateEmbeddedOrder('payment_method', v)}
+                                    >
+                                      <SelectTrigger className="bg-white">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="cash">نقدي</SelectItem>
+                                        <SelectItem value="credit">آجل</SelectItem>
+                                        <SelectItem value="bank">تحويل بنكي</SelectItem>
+                                        <SelectItem value="installment">تقسيط</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div>
+                                    <Label className="text-xs">خصم (%)</Label>
+                                    <Input
+                                      type="number"
+                                      min="0"
+                                      max="100"
+                                      value={formData.embedded_order.discount_value}
+                                      onChange={(e) => {
+                                        updateEmbeddedOrder('discount_value', parseFloat(e.target.value) || 0);
+                                        setTimeout(() => calculateOrderTotal(formData.embedded_order.products), 0);
+                                      }}
+                                      className="bg-white"
+                                    />
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Total */}
+                              <div className="flex justify-between items-center p-3 bg-white rounded-lg">
+                                <span className="font-semibold">الإجمالي:</span>
+                                <span className="text-xl font-bold text-primary">
+                                  {formData.embedded_order.products.reduce((sum, item) => sum + (item.price * item.quantity), 0).toFixed(2)} ج.م
+                                </span>
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
 
                     {/* Follow Up & Rating */}
                     <div className="grid grid-cols-2 gap-4">

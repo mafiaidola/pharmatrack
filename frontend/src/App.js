@@ -18,6 +18,7 @@ import PerformanceDashboard from './pages/PerformanceDashboard';
 import Settings from './pages/Settings';
 import Returns from './pages/Returns';
 import Accounting from './pages/Accounting';
+import Plans from './pages/Plans';
 import { Toaster } from './components/ui/sonner';
 import { SiteSettingsProvider } from './contexts/SiteSettingsContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -193,6 +194,14 @@ const App = () => {
               element={
                 <ProtectedRoute allowedRoles={['accountant', 'gm', 'super_admin']}>
                   <Accounting user={user} onLogout={handleLogout} />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/plans"
+              element={
+                <ProtectedRoute>
+                  <Plans user={user} onLogout={handleLogout} />
                 </ProtectedRoute>
               }
             />
